@@ -1,4 +1,4 @@
-import { ethers } from "ethers";
+﻿import { ethers } from "ethers";
 import {
   API_BASE,
   CHAINS,
@@ -61,6 +61,7 @@ const appState = {
     total: 0,
     sortKey: DEFAULT_MARKET_SORT.sortKey,
     sortDirection: DEFAULT_MARKET_SORT.sortDirection,
+    query: "",
   },
   history: {
     pageSize: 20,
@@ -72,6 +73,7 @@ const appState = {
     total: 0,
     sortKey: "createdAt",
     sortDirection: "desc",
+    query: "",
   },
   loading: {
     market: false,
@@ -146,6 +148,11 @@ root.innerHTML = `
             <span id="bestPrice">最优价 -</span>
           </div>
         </div>
+        <form id="marketSearchForm" class="toolbar-form">
+          <input id="marketSearchInput" type="text" placeholder="搜索订单号 / 卖方地址 / 状态 / 代币 / 链" />
+          <button type="submit" class="button button-mini button-primary toolbar-submit">查询</button>
+          <button type="button" id="marketSearchReset" class="button button-mini button-ghost toolbar-reset">清空</button>
+        </form>
         <div class="table-wrap orders-table-wrap">
           <table>
             <thead>
@@ -204,6 +211,11 @@ root.innerHTML = `
               <span id="networkHistoryCount">全网最近历史订单</span>
             </div>
           </div>
+          <form id="networkHistorySearchForm" class="toolbar-form">
+            <input id="networkHistorySearchInput" type="text" placeholder="搜索订单号 / 买卖方地址 / 状态 / 代币 / 链" />
+            <button type="submit" class="button button-mini button-primary toolbar-submit">查询</button>
+            <button type="button" id="networkHistorySearchReset" class="button button-mini button-ghost toolbar-reset">清空</button>
+          </form>
           <div class="table-wrap history-table-wrap">
             <table>
               <thead>
@@ -281,6 +293,9 @@ const ui = {
   activeOrdersPager: document.querySelector("#activeOrdersPager"),
   activeCount: document.querySelector("#activeCount"),
   bestPrice: document.querySelector("#bestPrice"),
+  marketSearchForm: document.querySelector("#marketSearchForm"),
+  marketSearchInput: document.querySelector("#marketSearchInput"),
+  marketSearchReset: document.querySelector("#marketSearchReset"),
   balances: document.querySelector("#balances"),
   createOrderForm: document.querySelector("#createOrderForm"),
   keeperUrlInput: document.querySelector("#keeperUrlInput"),
@@ -292,6 +307,9 @@ const ui = {
   networkHistoryBody: document.querySelector("#networkHistoryBody"),
   networkHistoryCount: document.querySelector("#networkHistoryCount"),
   networkHistoryPager: document.querySelector("#networkHistoryPager"),
+  networkHistorySearchForm: document.querySelector("#networkHistorySearchForm"),
+  networkHistorySearchInput: document.querySelector("#networkHistorySearchInput"),
+  networkHistorySearchReset: document.querySelector("#networkHistorySearchReset"),
 };
 
 const formatAddress = (value) => (value ? `${value.slice(0, 6)}...${value.slice(-4)}` : "-");
@@ -320,6 +338,16 @@ const safeText = (value, fallback = "-") => {
   }
   return fallback;
 };
+
+const buildApiQuery = (params) =>
+  new URLSearchParams(
+    Object.entries(params).reduce((acc, [key, value]) => {
+      if (value !== undefined && value !== null && value !== "") {
+        acc[key] = String(value);
+      }
+      return acc;
+    }, {})
+  ).toString();
 
 const setStatus = (kind, text) => {
   appState.status = { kind, text };
@@ -435,6 +463,9 @@ const getNetworkHistorySortIndicator = (field) => {
 };
 
 const renderActiveOrders = () => {
+  if (ui.marketSearchInput && ui.marketSearchInput.value !== appState.market.query) {
+    ui.marketSearchInput.value = appState.market.query;
+  }
   document.querySelectorAll("[data-sort-field]").forEach((button) => {
     const field = button.dataset.sortField;
     button.textContent = `${SORTABLE_MARKET_FIELDS[field]}${getSortIndicator(field)}`;
@@ -493,7 +524,7 @@ const renderActiveOrdersPager = () => {
 };
 
 const renderMyOrders = () => {
-  if (ui.myOrdersCount) ui.myOrdersCount.textContent = `历史订单 ${appState.history.total || 0}笔`;
+  if (ui.myOrdersCount) ui.myOrdersCount.textContent = `历史订单 ${appState.history.total || 0} 笔`;
   if (!appState.account) {
     ui.myOrdersBody.innerHTML =
       '<tr><td colspan="7" class="empty">连接钱包后显示你的历史订单。</td></tr>';
@@ -546,6 +577,12 @@ const renderMyOrders = () => {
 };
 
 const renderNetworkHistoryOrders = () => {
+  if (
+    ui.networkHistorySearchInput &&
+    ui.networkHistorySearchInput.value !== appState.networkHistory.query
+  ) {
+    ui.networkHistorySearchInput.value = appState.networkHistory.query;
+  }
   document.querySelectorAll("[data-network-sort-field]").forEach((button) => {
     const field = button.dataset.networkSortField;
     button.textContent = `${NETWORK_HISTORY_SORT_FIELDS[field]}${getNetworkHistorySortIndicator(field)}`;
@@ -767,12 +804,17 @@ const fetchMarket = async () => {
   const offset = (appState.market.page - 1) * appState.market.pageSize;
   const sortBy = MARKET_SORT_API_FIELDS[appState.market.sortKey];
   const sortDir = appState.market.sortDirection;
+  const query = buildApiQuery({
+    offset,
+    limit: appState.market.pageSize,
+    sort_by: sortBy,
+    sort_dir: sortDir,
+    query: appState.market.query.trim(),
+  });
 
   const [summary, marketPayload] = await Promise.all([
     fetchApiJson("/market/summary"),
-    fetchApiJson(
-      `/orders/active?offset=${offset}&limit=${appState.market.pageSize}&sort_by=${sortBy}&sort_dir=${sortDir}`
-    ),
+    fetchApiJson(`/orders/active?${query}`),
   ]);
 
   appState.metrics.activeTotal = Number(summary.active_total || 0);
@@ -800,9 +842,14 @@ const fetchNetworkHistoryOrders = async () => {
   const sortBy =
     NETWORK_HISTORY_SORT_API_FIELDS[appState.networkHistory.sortKey] || "created_at";
   const sortDir = appState.networkHistory.sortDirection || "desc";
-  const payload = await fetchApiJson(
-    `/orders/history?offset=${offset}&limit=${appState.networkHistory.pageSize}&sort_by=${sortBy}&sort_dir=${sortDir}`
-  );
+  const query = buildApiQuery({
+    offset,
+    limit: appState.networkHistory.pageSize,
+    sort_by: sortBy,
+    sort_dir: sortDir,
+    query: appState.networkHistory.query.trim(),
+  });
+  const payload = await fetchApiJson(`/orders/history?${query}`);
   appState.networkHistory.total = Number(payload.total || 0);
   appState.networkHistoryOrders = (payload.items || []).map(normalizeApiOrder);
 };
@@ -1192,6 +1239,34 @@ ui.refreshButton.addEventListener("click", async () => {
 
 ui.refreshOrdersButton.addEventListener("click", async () => {
   await refreshOrdersOnly("正在刷新活跃订单...");
+});
+
+ui.marketSearchForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  appState.market.query = ui.marketSearchInput?.value?.trim() || "";
+  appState.market.page = 1;
+  await refreshOrdersOnly("正在查询活跃订单...");
+});
+
+ui.marketSearchReset?.addEventListener("click", async () => {
+  appState.market.query = "";
+  if (ui.marketSearchInput) ui.marketSearchInput.value = "";
+  appState.market.page = 1;
+  await refreshOrdersOnly("正在恢复全部活跃订单...");
+});
+
+ui.networkHistorySearchForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  appState.networkHistory.query = ui.networkHistorySearchInput?.value?.trim() || "";
+  appState.networkHistory.page = 1;
+  await loadNetworkHistory();
+});
+
+ui.networkHistorySearchReset?.addEventListener("click", async () => {
+  appState.networkHistory.query = "";
+  if (ui.networkHistorySearchInput) ui.networkHistorySearchInput.value = "";
+  appState.networkHistory.page = 1;
+  await loadNetworkHistory();
 });
 
 ui.keeperUrlInput?.addEventListener("change", (event) => {

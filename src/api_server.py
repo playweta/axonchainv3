@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, wait
-from functools import lru_cache
+from threading import Lock
 import os
 import time
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-import requests
 from web3 import Web3
 import uvicorn
 
@@ -35,8 +37,21 @@ MARKET_SORT_FIELDS = {
 DEFAULT_AXON_RPC_FALLBACK = "https://mainnet-rpc.axonchain.ai/"
 DEFAULT_BSC_RPC_FALLBACK = "https://bsc-dataseed.binance.org/"
 DEFAULT_ARBITRUM_RPC_FALLBACK = "https://arb1.arbitrum.io/rpc"
-LOCAL_AXON_RPC_CANDIDATES = ("http://127.0.0.1:8545", "http://localhost:8545")
 BALANCE_FETCH_TIMEOUT_SECONDS = 6
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("API_RATE_LIMIT_WINDOW_SECONDS", "60"))
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("API_RATE_LIMIT_MAX_REQUESTS", "120"))
+RATE_LIMIT_WRITE_MAX_REQUESTS = int(os.getenv("API_RATE_LIMIT_WRITE_MAX_REQUESTS", "20"))
+MAX_REQUEST_BODY_BYTES = int(os.getenv("API_MAX_REQUEST_BODY_BYTES", str(64 * 1024)))
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv("API_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+    if host.strip()
+]
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("API_ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 
 
 class PaymentInfoOverride(BaseModel):
@@ -45,42 +60,78 @@ class PaymentInfoOverride(BaseModel):
     buyer_address: str | None = None
 
 
+def get_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def check_rate_limit(client_ip: str, scope: str, max_requests: int) -> bool:
+    now = time.time()
+    bucket_key = f"{scope}:{client_ip}"
+    with _rate_limit_lock:
+        bucket = _rate_limit_buckets[bucket_key]
+        while bucket and now - bucket[0] > RATE_LIMIT_WINDOW_SECONDS:
+            bucket.popleft()
+        if len(bucket) >= max_requests:
+            return False
+        bucket.append(now)
+        return True
+
+
 app = FastAPI(title=APP_TITLE, version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS or ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS or ["*"])
+
+_rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
+_rate_limit_lock = Lock()
 
 
-@lru_cache(maxsize=8)
-def rpc_responds(rpc_url: str, expected_chain_id: int | None = None) -> bool:
-    try:
-        response = requests.post(
-            rpc_url,
-            json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
-            timeout=1.5,
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                return JSONResponse(status_code=413, content={"detail": "request body too large"})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "invalid content-length"})
+
+    client_ip = get_client_ip(request)
+    is_write = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+    allowed = check_rate_limit(
+        client_ip,
+        "write" if is_write else "read",
+        RATE_LIMIT_WRITE_MAX_REQUESTS if is_write else RATE_LIMIT_MAX_REQUESTS,
+    )
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "rate limit exceeded"},
+            headers={"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)},
         )
-        payload = response.json()
-        if "result" not in payload:
-            return False
-        if expected_chain_id is None:
-            return True
-        return int(payload["result"], 16) == expected_chain_id
-    except Exception:
-        return False
+
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-site"
+    return response
 
 
 def resolve_axon_rpc_url() -> str:
-    configured = os.getenv("AXON_RPC_URL")
-    if configured:
-        return configured
-    for candidate in LOCAL_AXON_RPC_CANDIDATES:
-        if rpc_responds(candidate, expected_chain_id=8210):
-            return candidate
-    return DEFAULT_AXON_RPC_FALLBACK
+    return os.getenv("AXON_RPC_URL", DEFAULT_AXON_RPC_FALLBACK)
 
 
 def build_client(*, payment_path: str | None = None, keeper_url: str | None = None) -> OTCClient:
@@ -103,6 +154,28 @@ def serialize_error(exc: Exception) -> HTTPException:
 
 def serialize_order(order: Any) -> dict[str, Any]:
     return order.to_dict() if hasattr(order, "to_dict") else order
+
+
+def matches_order_query(order: Any, query: str | None) -> bool:
+    if not query:
+        return True
+
+    needle = query.strip().lower()
+    if not needle:
+        return True
+
+    haystacks = [
+        str(getattr(order, "id", "")),
+        str(getattr(order, "seller", "")),
+        str(getattr(order, "buyer", "")),
+        str(getattr(order, "payment_token", "")),
+        str(getattr(order, "payment_chain_id", "")),
+        str(getattr(order, "payment_chain_name", "")),
+        str(getattr(order, "status", "")),
+        str(getattr(order, "status_label", "")),
+        str(getattr(order, "seller_payment_addr", "")),
+    ]
+    return any(needle in value.lower() for value in haystacks)
 
 
 def fetch_all_orders(client: OTCClient) -> list[Any]:
@@ -180,13 +253,14 @@ def active_orders(
     limit: int = Query(default=100, ge=1, le=500),
     sort_by: str | None = Query(default=None),
     sort_dir: str = Query(default="desc"),
+    query: str | None = Query(default=None, max_length=200),
 ) -> dict[str, Any]:
     client = build_client()
     try:
         all_orders = [
             order
             for order in client._get_active_orders_page(0, 500)
-            if order.status in MARKET_VISIBLE_STATUSES
+            if order.status in MARKET_VISIBLE_STATUSES and matches_order_query(order, query)
         ]
         sort_key = (sort_by or "").strip().lower()
         if sort_key:
@@ -205,6 +279,7 @@ def active_orders(
             "total": len(all_orders),
             "sort_by": sort_key or None,
             "sort_dir": sort_dir.lower(),
+            "query": query or "",
             "items": [serialize_order(order) for order in orders],
         }
     except Exception as exc:
@@ -217,11 +292,14 @@ def history_orders(
     limit: int = Query(default=50, ge=1, le=500),
     sort_by: str | None = Query(default="created_at"),
     sort_dir: str = Query(default="desc"),
+    query: str | None = Query(default=None, max_length=200),
 ) -> dict[str, Any]:
     client = build_client()
     try:
         all_orders = [
-            order for order in fetch_all_orders(client) if order.status in HISTORY_VISIBLE_STATUSES
+            order
+            for order in fetch_all_orders(client)
+            if order.status in HISTORY_VISIBLE_STATUSES and matches_order_query(order, query)
         ]
         sort_key = (sort_by or "").strip().lower()
         if sort_key:
@@ -241,6 +319,7 @@ def history_orders(
             "total": len(all_orders),
             "sort_by": sort_key or None,
             "sort_dir": sort_dir.lower(),
+            "query": query or "",
             "items": [serialize_order(order) for order in orders],
         }
     except HTTPException:
