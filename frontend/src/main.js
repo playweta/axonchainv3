@@ -7,6 +7,7 @@ import {
   DEFAULT_KEEPER_URL,
   ERC20_ABI,
   ORDER_CREATED_TOPIC,
+  readProviders,
   STATUS_LABELS,
   TOKENS,
 } from "./config";
@@ -129,6 +130,32 @@ root.innerHTML = `
       </div>
 
       <div class="hero-card">
+        <div class="social-links social-links-right">
+          <a
+            class="social-link"
+            href="https://github.com/playweta/axonchainv3"
+            target="_blank"
+            rel="noreferrer"
+          >
+            GitHub
+          </a>
+          <a
+            class="social-link"
+            href="https://x.com/atom82457"
+            target="_blank"
+            rel="noreferrer"
+          >
+            X / Twitter
+          </a>
+          <a
+            class="social-link"
+            href="https://t.me/maycode"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Telegram
+          </a>
+        </div>
         <div class="stat-grid" id="metricCards"></div>
         <div class="notice" id="statusBanner"></div>
       </div>
@@ -878,28 +905,59 @@ const fetchNetworkHistoryOrders = async () => {
   appState.networkHistoryOrders = (payload.items || []).map(normalizeApiOrder);
 };
 
-const normalizeBalanceItems = (items) =>
-  (items || []).map((item) => ({
-    chainId: Number(item.chain_id),
-    chainName: String(item.chain_name),
-    asset: String(item.asset),
-    balance: Number(item.balance),
-    balanceText: `${formatUsd(item.balance)} ${item.asset}`,
-    hint:
-      item.asset === CHAINS[Number(item.chain_id)]?.nativeSymbol
-        ? `地址 ${formatAddress(appState.account)}`
-        : `${item.chain_name} 资产`,
-  }));
+const withBalanceTimeout = async (promise, timeoutMs = 60000) => {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error("请求超时")), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+};
+
+const formatBalanceItem = (chainId, asset, balance) => ({
+  chainId,
+  chainName: String(CHAINS[chainId]?.label || chainId),
+  asset: String(asset),
+  balance: Number(balance),
+  balanceText: `${formatUsd(balance)} ${asset}`,
+  hint:
+    asset === CHAINS[chainId]?.nativeSymbol
+      ? `地址 ${formatAddress(appState.account)}`
+      : `${CHAINS[chainId]?.label || chainId} 资产`,
+});
 
 const fetchBalancesForChain = async (chainId) => {
   if (!appState.account) {
     return [];
   }
-  const payload = await fetchApiJsonWithTimeout(
-    `/addresses/${appState.account}/balances?chain_id=${chainId}&include_arbitrum=false`,
-    60000
-  );
-  return normalizeBalanceItems(payload.items);
+  const provider = readProviders[chainId];
+  if (!provider) {
+    throw new Error(`未配置 ${CHAINS[chainId]?.label || chainId} RPC`);
+  }
+
+  const nativeSymbol = CHAINS[chainId]?.nativeSymbol;
+  const items = [];
+
+  const nativeBalance = await withBalanceTimeout(provider.getBalance(appState.account), 60000);
+  items.push(formatBalanceItem(chainId, nativeSymbol, Number(ethers.formatEther(nativeBalance))));
+
+  const tokenMap = TOKENS[chainId] || {};
+  for (const [symbol, tokenMeta] of Object.entries(tokenMap)) {
+    const contract = new ethers.Contract(tokenMeta.address, ERC20_ABI, provider);
+    const rawBalance = await withBalanceTimeout(contract.balanceOf(appState.account), 60000);
+    items.push(
+      formatBalanceItem(
+        chainId,
+        symbol,
+        Number(ethers.formatUnits(rawBalance, tokenMeta.decimals))
+      )
+    );
+  }
+
+  return items;
 };
 
 const loadMarket = async () => {

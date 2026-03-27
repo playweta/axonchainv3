@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, wait
 from threading import Lock
@@ -144,6 +145,7 @@ def build_client(*, payment_path: str | None = None, keeper_url: str | None = No
         axon_rpc_url=resolve_axon_rpc_url(),
         bsc_rpc_url=os.getenv("BSC_RPC_URL", DEFAULT_BSC_RPC_FALLBACK),
         arbitrum_rpc_url=os.getenv("ARBITRUM_RPC_URL", DEFAULT_ARBITRUM_RPC_FALLBACK),
+        request_timeout=int(os.getenv("OTC_RPC_REQUEST_TIMEOUT", "60")),
         keeper_total_timeout=int(os.getenv("OTC_KEEPER_TOTAL_TIMEOUT", "30")),
     )
 
@@ -365,7 +367,7 @@ def order_detail(order_id: int) -> dict[str, Any]:
 
 
 @app.get(f"{API_PREFIX}/addresses/{{address}}/balances")
-def address_balances(
+async def address_balances(
     address: str,
     include_arbitrum: bool = Query(default=False),
     chain_id: int | None = Query(default=None),
@@ -389,7 +391,7 @@ def address_balances(
                 for token_symbol in CHAIN_CONFIG[current_chain_id].get("tokens", {}):
                     tasks.append((current_chain_id, token_symbol))
 
-        def fetch_balance(task: tuple[int, str]) -> dict[str, Any]:
+        def fetch_balance_sync(task: tuple[int, str]) -> dict[str, Any]:
             current_chain_id, asset = task
             chain_name = CHAIN_CONFIG[current_chain_id]["name"]
             if current_chain_id == 8210 and asset == CHAIN_CONFIG[8210]["native_symbol"]:
@@ -406,39 +408,22 @@ def address_balances(
                 "balance": balance,
             }
 
-        with ThreadPoolExecutor(max_workers=min(8, len(tasks) or 1)) as executor:
-            future_map = {executor.submit(fetch_balance, task): task for task in tasks}
-            done, not_done = wait(
-                future_map.keys(),
-                timeout=BALANCE_FETCH_TIMEOUT_SECONDS,
-            )
-
-            balances: list[dict[str, Any]] = []
-            for future in done:
-                try:
-                    balances.append(future.result())
-                except Exception:
-                    chain_id, asset = future_map[future]
-                    balances.append(
-                        {
-                            "chain_id": chain_id,
-                            "chain_name": CHAIN_CONFIG[chain_id]["name"],
-                            "asset": asset,
-                            "balance": 0.0,
-                        }
-                    )
-
-            for future in not_done:
-                chain_id, asset = future_map[future]
-                future.cancel()
-                balances.append(
-                    {
-                        "chain_id": chain_id,
-                        "chain_name": CHAIN_CONFIG[chain_id]["name"],
-                        "asset": asset,
-                        "balance": 0.0,
-                    }
+        async def fetch_balance(task: tuple[int, str]) -> dict[str, Any]:
+            current_chain_id, asset = task
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(fetch_balance_sync, task),
+                    timeout=BALANCE_FETCH_TIMEOUT_SECONDS,
                 )
+            except Exception:
+                return {
+                    "chain_id": current_chain_id,
+                    "chain_name": CHAIN_CONFIG[current_chain_id]["name"],
+                    "asset": asset,
+                    "balance": 0.0,
+                }
+
+        balances = await asyncio.gather(*(fetch_balance(task) for task in tasks))
 
         balances.sort(key=lambda item: (0 if item["chain_id"] == 8210 else item["chain_id"], item["asset"]))
         return {"address": address, "items": balances}
