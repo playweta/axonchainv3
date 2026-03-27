@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from functools import lru_cache
 import os
 import time
@@ -36,6 +36,7 @@ DEFAULT_AXON_RPC_FALLBACK = "https://mainnet-rpc.axonchain.ai/"
 DEFAULT_BSC_RPC_FALLBACK = "https://bsc-dataseed.binance.org/"
 DEFAULT_ARBITRUM_RPC_FALLBACK = "https://arb1.arbitrum.io/rpc"
 LOCAL_AXON_RPC_CANDIDATES = ("http://127.0.0.1:8545", "http://localhost:8545")
+BALANCE_FETCH_TIMEOUT_SECONDS = 6
 
 
 class PaymentInfoOverride(BaseModel):
@@ -318,7 +319,38 @@ def address_balances(address: str, include_arbitrum: bool = Query(default=False)
             }
 
         with ThreadPoolExecutor(max_workers=min(8, len(tasks) or 1)) as executor:
-            balances = list(executor.map(fetch_balance, tasks))
+            future_map = {executor.submit(fetch_balance, task): task for task in tasks}
+            done, not_done = wait(
+                future_map.keys(),
+                timeout=BALANCE_FETCH_TIMEOUT_SECONDS,
+            )
+
+            balances: list[dict[str, Any]] = []
+            for future in done:
+                try:
+                    balances.append(future.result())
+                except Exception:
+                    chain_id, asset = future_map[future]
+                    balances.append(
+                        {
+                            "chain_id": chain_id,
+                            "chain_name": CHAIN_CONFIG[chain_id]["name"],
+                            "asset": asset,
+                            "balance": 0.0,
+                        }
+                    )
+
+            for future in not_done:
+                chain_id, asset = future_map[future]
+                future.cancel()
+                balances.append(
+                    {
+                        "chain_id": chain_id,
+                        "chain_name": CHAIN_CONFIG[chain_id]["name"],
+                        "asset": asset,
+                        "balance": 0.0,
+                    }
+                )
 
         balances.sort(key=lambda item: (0 if item["chain_id"] == 8210 else item["chain_id"], item["asset"]))
         return {"address": address, "items": balances}
