@@ -1,0 +1,79 @@
+[
+  {
+    "inputs": [],
+    "name": "getOrderCount",
+    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [{"internalType": "uint256", "name": "orderId", "type": "uint256"}],
+    "name": "getOrder",
+    "outputs": [
+      {
+        "components": [
+          {"internalType": "address", "name": "seller", "type": "address"},
+          {"internalType": "address", "name": "buyer", "type": "address"},
+          {"internalType": "address", "name": "sellerPaymentAddr", "type": "address"},
+          {"internalType": "uint256", "name": "amountAxon", "type": "uint256"},
+          {"internalType": "uint256", "name": "priceUsd", "type": "uint256"},
+          {"internalType": "uint256", "name": "paymentChainId", "type": "uint256"},
+          {"internalType": "string", "name": "paymentToken", "type": "string"},
+          {"internalType": "uint8", "name": "status", "type": "uint8"},
+          {"internalType": "uint256", "name": "cancelRequestedAt", "type": "uint256"},
+          {"internalType": "uint256", "name": "createdAt", "type": "uint256"},
+          {"internalType": "uint256", "name": "completedAt", "type": "uint256"}
+        ],
+        "internalType": "struct AxonOTCV7.Order",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "uint256", "name": "amountAxon", "type": "uint256"},
+      {"internalType": "uint256", "name": "priceUsd", "type": "uint256"},
+      {"internalType": "uint256", "name": "paymentChainId", "type": "uint256"},
+      {"internalType": "string", "name": "paymentToken", "type": "string"},
+      {"internalType": "address", "name": "sellerPaymentAddr", "type": "address"}
+    ],
+    "name": "createSellOrder",
+    "outputs": [{"internalType": "uint256", "name": "orderId", "type": "uint256"}],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [{"internalType": "uint256", "name": "orderId", "type": "uint256"}],
+    "name": "requestCancelOrder",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [{"internalType": "uint256", "name": "orderId", "type": "uint256"}],
+    "name": "finalizeCancelOrder",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [{"internalType": "uint256", "name": "orderId", "type": "uint256"}],
+    "name": "abortCancel",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "uint256", "name": "orderId", "type": "uint256"},
+      {"internalType": "address", "name": "buyer", "type": "address"}
+    ],
+    "name": "sellerRelease",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]
