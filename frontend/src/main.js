@@ -493,7 +493,7 @@ const renderActiveOrdersPager = () => {
 };
 
 const renderMyOrders = () => {
-  if (ui.myOrdersCount) ui.myOrdersCount.textContent = `???? ${appState.history.total || 0}`;
+  if (ui.myOrdersCount) ui.myOrdersCount.textContent = `历史订单 ${appState.history.total || 0}笔`;
   if (!appState.account) {
     ui.myOrdersBody.innerHTML =
       '<tr><td colspan="7" class="empty">连接钱包后显示你的历史订单。</td></tr>';
