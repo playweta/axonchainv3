@@ -397,7 +397,7 @@ const fetchApiJson = async (path) => {
   return response.json();
 };
 
-const fetchApiJsonWithTimeout = async (path, timeoutMs = 8000) => {
+const fetchApiJsonWithTimeout = async (path, timeoutMs = 60000) => {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -897,7 +897,7 @@ const fetchBalancesForChain = async (chainId) => {
   }
   const payload = await fetchApiJsonWithTimeout(
     `/addresses/${appState.account}/balances?chain_id=${chainId}&include_arbitrum=false`,
-    chainId === 8210 ? 6000 : 9000
+    60000
   );
   return normalizeBalanceItems(payload.items);
 };
