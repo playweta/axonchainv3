@@ -397,6 +397,26 @@ const fetchApiJson = async (path) => {
   return response.json();
 };
 
+const fetchApiJsonWithTimeout = async (path, timeoutMs = 8000) => {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${API_BASE}${path}`, { signal: controller.signal });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("请求超时");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+};
+
 const renderWallet = () => {
   ui.walletAddress.textContent = appState.account ? appState.account : "未连接";
   ui.walletChain.textContent = appState.currentChainId
@@ -704,6 +724,10 @@ const renderBalances = () => {
       `
     )
     .join("");
+
+  if (appState.errors.balances) {
+    ui.balances.innerHTML += `<div class="empty-card">${appState.errors.balances}</div>`;
+  }
 };
 
 const renderAll = () => {
@@ -854,13 +878,8 @@ const fetchNetworkHistoryOrders = async () => {
   appState.networkHistoryOrders = (payload.items || []).map(normalizeApiOrder);
 };
 
-const fetchBalances = async () => {
-  if (!appState.account) {
-    appState.balances = [];
-    return;
-  }
-  const payload = await fetchApiJson(`/addresses/${appState.account}/balances?include_arbitrum=false`);
-  appState.balances = (payload.items || []).map((item) => ({
+const normalizeBalanceItems = (items) =>
+  (items || []).map((item) => ({
     chainId: Number(item.chain_id),
     chainName: String(item.chain_name),
     asset: String(item.asset),
@@ -871,6 +890,16 @@ const fetchBalances = async () => {
         ? `地址 ${formatAddress(appState.account)}`
         : `${item.chain_name} 资产`,
   }));
+
+const fetchBalancesForChain = async (chainId) => {
+  if (!appState.account) {
+    return [];
+  }
+  const payload = await fetchApiJsonWithTimeout(
+    `/addresses/${appState.account}/balances?chain_id=${chainId}&include_arbitrum=false`,
+    chainId === 8210 ? 6000 : 9000
+  );
+  return normalizeBalanceItems(payload.items);
 };
 
 const loadMarket = async () => {
@@ -946,10 +975,35 @@ const loadBalances = async () => {
   const requestId = ++appState.requests.balances;
   appState.loading.balances = Boolean(appState.account);
   appState.errors.balances = "";
+  appState.balances = [];
   renderBalances();
   try {
-    await fetchBalances();
+    if (!appState.account) return;
+
+    const chainIds = [8210, 56];
+    const errors = [];
+
+    await Promise.all(
+      chainIds.map(async (chainId) => {
+        try {
+          const items = await fetchBalancesForChain(chainId);
+          if (requestId !== appState.requests.balances) return;
+          const otherItems = appState.balances.filter((item) => Number(item.chainId) !== chainId);
+          appState.balances = [...otherItems, ...items].sort(
+            (left, right) =>
+              (left.chainId === 8210 ? 0 : left.chainId) - (right.chainId === 8210 ? 0 : right.chainId) ||
+              left.asset.localeCompare(right.asset)
+          );
+          renderBalances();
+        } catch (error) {
+          if (requestId !== appState.requests.balances) return;
+          errors.push(`${CHAINS[chainId]?.label || chainId}: ${error.message || "加载失败"}`);
+        }
+      })
+    );
+
     if (requestId !== appState.requests.balances) return;
+    appState.errors.balances = errors.join(" | ");
   } catch (error) {
     if (requestId !== appState.requests.balances) return;
     appState.balances = [];

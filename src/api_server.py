@@ -365,33 +365,42 @@ def order_detail(order_id: int) -> dict[str, Any]:
 
 
 @app.get(f"{API_PREFIX}/addresses/{{address}}/balances")
-def address_balances(address: str, include_arbitrum: bool = Query(default=False)) -> dict[str, Any]:
+def address_balances(
+    address: str,
+    include_arbitrum: bool = Query(default=False),
+    chain_id: int | None = Query(default=None),
+) -> dict[str, Any]:
     client = build_client()
     try:
         address = Web3.to_checksum_address(address)
-        chain_ids = [8210, 56]
-        if include_arbitrum:
-            chain_ids.append(42161)
+        if chain_id is not None:
+            if chain_id not in CHAIN_CONFIG:
+                raise HTTPException(status_code=400, detail="unsupported chain_id")
+            chain_ids = [chain_id]
+        else:
+            chain_ids = [8210, 56]
+            if include_arbitrum:
+                chain_ids.append(42161)
 
-        tasks: list[tuple[int, str]] = [(8210, CHAIN_CONFIG[8210]["native_symbol"])]
-        for chain_id in chain_ids:
-            if chain_id != 8210:
-                tasks.append((chain_id, CHAIN_CONFIG[chain_id]["native_symbol"]))
-                for token_symbol in CHAIN_CONFIG[chain_id].get("tokens", {}):
-                    tasks.append((chain_id, token_symbol))
+        tasks: list[tuple[int, str]] = []
+        for current_chain_id in chain_ids:
+            tasks.append((current_chain_id, CHAIN_CONFIG[current_chain_id]["native_symbol"]))
+            if current_chain_id != 8210:
+                for token_symbol in CHAIN_CONFIG[current_chain_id].get("tokens", {}):
+                    tasks.append((current_chain_id, token_symbol))
 
         def fetch_balance(task: tuple[int, str]) -> dict[str, Any]:
-            chain_id, asset = task
-            chain_name = CHAIN_CONFIG[chain_id]["name"]
-            if chain_id == 8210 and asset == CHAIN_CONFIG[8210]["native_symbol"]:
+            current_chain_id, asset = task
+            chain_name = CHAIN_CONFIG[current_chain_id]["name"]
+            if current_chain_id == 8210 and asset == CHAIN_CONFIG[8210]["native_symbol"]:
                 balance = client.axon_balance_of(address)
-            elif asset == CHAIN_CONFIG[chain_id]["native_symbol"]:
-                web3 = client._get_web3(chain_id, required=True)
+            elif asset == CHAIN_CONFIG[current_chain_id]["native_symbol"]:
+                web3 = client._get_web3(current_chain_id, required=True)
                 balance = float(web3.from_wei(web3.eth.get_balance(address), "ether"))
             else:
-                balance = client.stablecoin_balance_of(address, chain_id, asset)
+                balance = client.stablecoin_balance_of(address, current_chain_id, asset)
             return {
-                "chain_id": chain_id,
+                "chain_id": current_chain_id,
                 "chain_name": chain_name,
                 "asset": asset,
                 "balance": balance,
