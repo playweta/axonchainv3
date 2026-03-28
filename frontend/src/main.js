@@ -38,6 +38,7 @@ const NETWORK_HISTORY_SORT_API_FIELDS = {
   totalPayment: "total_payment",
   createdAt: "created_at",
 };
+const REPEAT_CLICK_LOCK_MS = 5000;
 
 const appState = {
   account: null,
@@ -93,6 +94,11 @@ const appState = {
     history: 0,
     networkHistory: 0,
     balances: 0,
+  },
+  interactionLocks: {
+    createOrderUntil: 0,
+    buyOrderUntilById: {},
+    queryUntilByKey: {},
   },
   status: {
     kind: "info",
@@ -364,6 +370,43 @@ const safeText = (value, fallback = "-") => {
     }
   }
   return fallback;
+};
+
+const getRemainingLockSeconds = (lockedUntil) =>
+  Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000));
+
+const withTemporaryButtonLock = (button) => {
+  if (!button) return;
+  button.disabled = true;
+  window.setTimeout(() => {
+    button.disabled = false;
+  }, REPEAT_CLICK_LOCK_MS);
+};
+
+const getQueryLockRemainingSeconds = (key) => {
+  const lockedUntil = appState.interactionLocks.queryUntilByKey[key] || 0;
+  if (lockedUntil <= Date.now()) return 0;
+  return getRemainingLockSeconds(lockedUntil);
+};
+
+const remindQueryCooldown = (label, remaining) => {
+  setStatus("error", `${label}冷却中，请 ${remaining} 秒后再试`);
+  window.alert(appState.status.text);
+};
+
+const lockQueryAction = (key) => {
+  appState.interactionLocks.queryUntilByKey[key] = Date.now() + REPEAT_CLICK_LOCK_MS;
+};
+
+const beginQueryAction = (key, label, button = null) => {
+  const remaining = getQueryLockRemainingSeconds(key);
+  if (remaining > 0) {
+    remindQueryCooldown(label, remaining);
+    return false;
+  }
+  lockQueryAction(key);
+  withTemporaryButtonLock(button);
+  return true;
 };
 
 const buildApiQuery = (params) =>
@@ -1346,21 +1389,26 @@ ui.themeButton.addEventListener("click", () => {
 });
 
 ui.refreshButton.addEventListener("click", async () => {
+  if (!beginQueryAction("refreshAll", "刷新市场按钮")) return;
   await refreshDataAjax("正在刷新市场数据...");
 });
 
 ui.refreshOrdersButton.addEventListener("click", async () => {
+  if (!beginQueryAction("refreshOrders", "刷新订单按钮", ui.refreshOrdersButton)) return;
   await refreshOrdersOnly("正在刷新活跃订单...");
 });
 
 ui.marketSearchForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const submitButton = ui.marketSearchForm?.querySelector('button[type="submit"]');
+  if (!beginQueryAction("marketSearch", "活跃订单查询按钮", submitButton)) return;
   appState.market.query = ui.marketSearchInput?.value?.trim() || "";
   appState.market.page = 1;
   await refreshOrdersOnly("正在查询活跃订单...");
 });
 
 ui.marketSearchReset?.addEventListener("click", async () => {
+  if (!beginQueryAction("marketSearchReset", "活跃订单清空按钮", ui.marketSearchReset)) return;
   appState.market.query = "";
   if (ui.marketSearchInput) ui.marketSearchInput.value = "";
   appState.market.page = 1;
@@ -1369,12 +1417,23 @@ ui.marketSearchReset?.addEventListener("click", async () => {
 
 ui.networkHistorySearchForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const submitButton = ui.networkHistorySearchForm?.querySelector('button[type="submit"]');
+  if (!beginQueryAction("networkHistorySearch", "全网历史查询按钮", submitButton)) return;
   appState.networkHistory.query = ui.networkHistorySearchInput?.value?.trim() || "";
   appState.networkHistory.page = 1;
   await loadNetworkHistory();
 });
 
 ui.networkHistorySearchReset?.addEventListener("click", async () => {
+  if (
+    !beginQueryAction(
+      "networkHistorySearchReset",
+      "全网历史清空按钮",
+      ui.networkHistorySearchReset
+    )
+  ) {
+    return;
+  }
   appState.networkHistory.query = "";
   if (ui.networkHistorySearchInput) ui.networkHistorySearchInput.value = "";
   appState.networkHistory.page = 1;
@@ -1391,7 +1450,18 @@ ui.paymentPathInput?.addEventListener("change", (event) => {
 
 ui.createOrderForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const now = Date.now();
+  if (appState.interactionLocks.createOrderUntil > now) {
+    const remaining = getRemainingLockSeconds(appState.interactionLocks.createOrderUntil);
+    setStatus("error", `创建卖单按钮冷却中，请 ${remaining} 秒后再试`);
+    window.alert(appState.status.text);
+    return;
+  }
+
+  appState.interactionLocks.createOrderUntil = now + REPEAT_CLICK_LOCK_MS;
   const formData = new FormData(ui.createOrderForm);
+  const submitButton = ui.createOrderForm.querySelector('button[type="submit"]');
+  withTemporaryButtonLock(submitButton);
   try {
     await createOrder(formData);
     ui.createOrderForm.reset();
@@ -1405,9 +1475,20 @@ ui.createOrderForm.addEventListener("submit", async (event) => {
 ui.activeOrdersBody.addEventListener("click", async (event) => {
   const buyButton = event.target.closest("[data-buy]");
   if (!buyButton) return;
+  const orderId = Number(buyButton.dataset.buy);
+  const now = Date.now();
+  const lockedUntil = appState.interactionLocks.buyOrderUntilById[orderId] || 0;
+  if (lockedUntil > now) {
+    const remaining = getRemainingLockSeconds(lockedUntil);
+    setStatus("error", `订单 #${orderId} 买入按钮冷却中，请 ${remaining} 秒后再试`);
+    window.alert(appState.status.text);
+    return;
+  }
 
+  appState.interactionLocks.buyOrderUntilById[orderId] = now + REPEAT_CLICK_LOCK_MS;
+  withTemporaryButtonLock(buyButton);
   try {
-    await buyOrder(Number(buyButton.dataset.buy));
+    await buyOrder(orderId);
     await refreshDataAjax("付款完成，正在刷新订单状态...");
   } catch (error) {
     console.error(error);
@@ -1419,6 +1500,7 @@ ui.activeOrdersBody.addEventListener("click", async (event) => {
 ui.activeOrdersPager.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-market-page]");
   if (!button || appState.loading.market) return;
+  if (!beginQueryAction("marketPage", "活跃订单翻页按钮", button)) return;
 
   const totalPages = Math.max(1, Math.ceil((appState.market.total || 0) / appState.market.pageSize));
   if (button.dataset.marketPage === "prev" && appState.market.page > 1) {
@@ -1434,6 +1516,7 @@ ui.activeOrdersPager.addEventListener("click", async (event) => {
 ui.networkHistoryPager.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-network-history-page]");
   if (!button || appState.loading.networkHistory) return;
+  if (!beginQueryAction("networkHistoryPage", "全网历史翻页按钮", button)) return;
 
   const totalPages = Math.max(
     1,
@@ -1455,6 +1538,7 @@ ui.networkHistoryPager.addEventListener("click", async (event) => {
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-sort-field]");
   if (!button) return;
+  if (!beginQueryAction("marketSort", "活跃订单排序按钮", button)) return;
 
   const field = button.dataset.sortField;
   if (!SORTABLE_MARKET_FIELDS[field]) return;
@@ -1473,6 +1557,7 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-network-sort-field]");
   if (!button) return;
+  if (!beginQueryAction("networkHistorySort", "全网历史排序按钮", button)) return;
 
   const field = button.dataset.networkSortField;
   if (!NETWORK_HISTORY_SORT_FIELDS[field]) return;
