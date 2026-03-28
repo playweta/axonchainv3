@@ -38,6 +38,11 @@ const NETWORK_HISTORY_SORT_API_FIELDS = {
   totalPayment: "total_payment",
   createdAt: "created_at",
 };
+const CHART_INTERVALS = {
+  hour: { label: "1小时", bucketSeconds: 3600 },
+  sixHour: { label: "6小时", bucketSeconds: 21600 },
+  day: { label: "1天", bucketSeconds: 86400 },
+};
 const REPEAT_CLICK_LOCK_MS = 5000;
 
 const appState = {
@@ -69,6 +74,11 @@ const appState = {
     pageSize: 20,
     total: 0,
   },
+  priceChart: {
+    interval: "hour",
+    candles: [],
+    tradeCount: 0,
+  },
   networkHistory: {
     page: 1,
     pageSize: 20,
@@ -80,18 +90,21 @@ const appState = {
   loading: {
     market: false,
     history: false,
+    priceChart: false,
     networkHistory: false,
     balances: false,
   },
   errors: {
     market: "",
     history: "",
+    priceChart: "",
     networkHistory: "",
     balances: "",
   },
   requests: {
     market: 0,
     history: 0,
+    priceChart: 0,
     networkHistory: 0,
     balances: 0,
   },
@@ -127,11 +140,19 @@ root.innerHTML = `
         <section class="wallet-balance-panel">
           <div class="panel-head wallet-balance-head">
             <div>
-              <p class="panel-kicker">Wallet</p>
-              <h2>钱包余额</h2>
+              <p class="panel-kicker">Trades</p>
+              <h2>成交价 K 线</h2>
+            </div>
+            <div class="trade-chart-actions">
+              <select id="priceChartInterval">
+                <option value="hour">1小时</option>
+                <option value="sixHour">6小时</option>
+                <option value="day">1天</option>
+              </select>
             </div>
           </div>
-          <div id="balances" class="balance-grid"></div>
+          <div class="trade-chart-meta" id="priceChartMeta">按已成交订单聚合</div>
+          <div class="trade-chart-frame" id="priceChart"></div>
         </section>
       </div>
 
@@ -271,6 +292,16 @@ root.innerHTML = `
 
       <div class="stack">
         <section class="panel">
+          <div class="panel-head wallet-balance-head">
+            <div>
+              <p class="panel-kicker">Wallet</p>
+              <h2>钱包余额</h2>
+            </div>
+          </div>
+          <div id="balances" class="balance-grid"></div>
+        </section>
+
+        <section class="panel">
           <div class="panel-head">
             <div>
               <p class="panel-kicker">Create</p>
@@ -307,6 +338,46 @@ root.innerHTML = `
           </form>
         </section>
 
+        <section class="panel hidden-prototype">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">Prototype</p>
+              <h2>挂买单</h2>
+            </div>
+          </div>
+          <form id="createBuyOrderForm" class="form">
+            <label>
+              <span>期望购买 AXON 数量</span>
+              <input name="amountAxon" type="number" min="0" step="0.0001" placeholder="100" required />
+            </label>
+            <label>
+              <span>目标单价（USD）</span>
+              <input name="priceUsd" type="number" min="0" step="0.000001" placeholder="0.02" required />
+            </label>
+            <label>
+              <span>付款链</span>
+              <select name="paymentChainId">
+                <option value="56">BSC</option>
+              </select>
+            </label>
+            <label>
+              <span>稳定币</span>
+              <select name="paymentToken">
+                <option value="USDT">USDT</option>
+                <option value="USDC">USDC</option>
+              </select>
+            </label>
+            <label>
+              <span>付款地址</span>
+              <input name="buyerPaymentAddr" type="text" placeholder="默认使用当前钱包地址" />
+            </label>
+            <button type="submit" class="button button-ghost">提交挂买单原型</button>
+          </form>
+          <div class="prototype-note">
+            当前仅为前端原型入口。现网合约未开放 createBuyOrder，后续接入时可复用这套表单字段。
+          </div>
+        </section>
+
       </div>
     </section>
 
@@ -331,12 +402,16 @@ const ui = {
   marketSearchReset: document.querySelector("#marketSearchReset"),
   balances: document.querySelector("#balances"),
   createOrderForm: document.querySelector("#createOrderForm"),
+  createBuyOrderForm: document.querySelector("#createBuyOrderForm"),
   keeperUrlInput: document.querySelector("#keeperUrlInput"),
   paymentPathInput: document.querySelector("#paymentPathInput"),
   myOrdersBody: document.querySelector("#myOrdersBody"),
   myOrdersCount:
     document.querySelector("#myOrdersCount") ||
     document.querySelector(".history-panel .inline-meta span"),
+  priceChart: document.querySelector("#priceChart"),
+  priceChartMeta: document.querySelector("#priceChartMeta"),
+  priceChartInterval: document.querySelector("#priceChartInterval"),
   networkHistoryBody: document.querySelector("#networkHistoryBody"),
   networkHistoryCount: document.querySelector("#networkHistoryCount"),
   networkHistoryPager: document.querySelector("#networkHistoryPager"),
@@ -357,6 +432,21 @@ const formatPrice = (raw) =>
 const formatDate = (timestamp) => {
   if (!timestamp) return "-";
   return new Date(Number(timestamp) * 1000).toLocaleString("zh-CN", { hour12: false });
+};
+const formatBucketLabel = (timestamp, bucketSeconds) => {
+  const date = new Date(Number(timestamp) * 1000);
+  if (bucketSeconds >= 86400) {
+    return date.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+  }
+  if (bucketSeconds >= 21600) {
+    return date.toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      hour12: false,
+    });
+  }
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
 };
 const safeText = (value, fallback = "-") => {
   if (value == null || value === "") return fallback;
@@ -667,6 +757,9 @@ const renderMyOrders = () => {
 };
 
 const renderNetworkHistoryOrders = () => {
+  if (ui.priceChartInterval && ui.priceChartInterval.value !== appState.priceChart.interval) {
+    ui.priceChartInterval.value = appState.priceChart.interval;
+  }
   if (
     ui.networkHistorySearchInput &&
     ui.networkHistorySearchInput.value !== appState.networkHistory.query
@@ -711,6 +804,156 @@ const renderNetworkHistoryOrders = () => {
       `
     )
     .join("");
+};
+
+const renderPriceChart = () => {
+  const intervalMeta = CHART_INTERVALS[appState.priceChart.interval] || CHART_INTERVALS.hour;
+  ui.priceChartMeta.textContent = `按已成交订单聚合 | ${intervalMeta.label} | ${appState.priceChart.tradeCount} 笔成交`;
+
+  if (appState.loading.priceChart && !appState.priceChart.candles.length) {
+    ui.priceChart.innerHTML = '<div class="empty-card">正在生成成交价 K 线...</div>';
+    return;
+  }
+  if (appState.errors.priceChart && !appState.priceChart.candles.length) {
+    ui.priceChart.innerHTML = `<div class="empty-card">${appState.errors.priceChart}</div>`;
+    return;
+  }
+  if (!appState.priceChart.candles.length) {
+    ui.priceChart.innerHTML = '<div class="empty-card">成交数据不足，暂时无法绘制 K 线。</div>';
+    return;
+  }
+
+  const candles = appState.priceChart.candles;
+  const width = 920;
+  const height = 320;
+  const pad = { top: 24, right: 16, bottom: 34, left: 60 };
+  const plotWidth = width - pad.left - pad.right;
+  const plotHeight = height - pad.top - pad.bottom;
+  const low = Math.min(...candles.map((item) => item.low));
+  const high = Math.max(...candles.map((item) => item.high));
+  const range = Math.max(high - low, 0.000001);
+  const candleSlot = plotWidth / Math.max(candles.length, 1);
+  const candleWidth = Math.max(6, Math.min(22, candleSlot * 0.55));
+  const priceToY = (price) => pad.top + ((high - price) / range) * plotHeight;
+  const xForIndex = (index) => pad.left + candleSlot * index + candleSlot / 2;
+
+  const gridValues = Array.from({ length: 5 }, (_, index) => low + (range * index) / 4);
+  const yLabels = gridValues
+    .map((value) => {
+      const y = priceToY(value);
+      return `
+        <line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" class="chart-grid-line" />
+        <text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" class="chart-axis-label">$${value.toFixed(4)}</text>
+      `;
+    })
+    .join("");
+
+  const xLabels = candles
+    .filter((_, index) => index === 0 || index === candles.length - 1 || index % Math.ceil(candles.length / 4) === 0)
+    .map((candle) => `
+      <text x="${xForIndex(candle.index)}" y="${height - 10}" text-anchor="middle" class="chart-axis-label">
+        ${formatBucketLabel(candle.timestamp, intervalMeta.bucketSeconds)}
+      </text>
+    `)
+    .join("");
+
+  const candleNodes = candles
+    .map((candle, index) => {
+      const x = xForIndex(index);
+      const openY = priceToY(candle.open);
+      const closeY = priceToY(candle.close);
+      const highY = priceToY(candle.high);
+      const lowY = priceToY(candle.low);
+      const top = Math.min(openY, closeY);
+      const bodyHeight = Math.max(Math.abs(closeY - openY), 2);
+      const rising = candle.close >= candle.open;
+      const bodyClass = rising ? "chart-candle-up" : "chart-candle-down";
+
+      return `
+        <g class="chart-candle-group">
+          <line x1="${x}" y1="${highY}" x2="${x}" y2="${lowY}" class="chart-wick ${bodyClass}" />
+          <rect
+            x="${x - candleWidth / 2}"
+            y="${top}"
+            width="${candleWidth}"
+            height="${bodyHeight}"
+            rx="3"
+            class="chart-body ${bodyClass}"
+          />
+          <title>${formatBucketLabel(candle.timestamp, intervalMeta.bucketSeconds)} | O ${candle.open.toFixed(4)} H ${candle.high.toFixed(4)} L ${candle.low.toFixed(4)} C ${candle.close.toFixed(4)}</title>
+        </g>
+      `;
+    })
+    .join("");
+
+  const latest = candles[candles.length - 1];
+  ui.priceChart.innerHTML = `
+    <div class="trade-chart-summary">
+      <span>最新收盘</span>
+      <strong>$${latest.close.toFixed(4)}</strong>
+      <small>区间最高 $${high.toFixed(4)} / 最低 $${low.toFixed(4)}</small>
+    </div>
+    <div class="trade-chart-stage">
+      <svg viewBox="0 0 ${width} ${height}" class="trade-chart-svg" role="img" aria-label="成交价 K 线图">
+        ${yLabels}
+        ${candleNodes}
+        ${xLabels}
+      </svg>
+      <div class="trade-chart-crosshair" hidden>
+        <div class="trade-chart-crosshair-x"></div>
+        <div class="trade-chart-crosshair-y"></div>
+        <div class="trade-chart-tooltip"></div>
+        <div class="trade-chart-price-tag"></div>
+      </div>
+    </div>
+  `;
+
+  const stage = ui.priceChart.querySelector(".trade-chart-stage");
+  const crosshair = ui.priceChart.querySelector(".trade-chart-crosshair");
+  const crosshairX = ui.priceChart.querySelector(".trade-chart-crosshair-x");
+  const crosshairY = ui.priceChart.querySelector(".trade-chart-crosshair-y");
+  const tooltip = ui.priceChart.querySelector(".trade-chart-tooltip");
+  const priceTag = ui.priceChart.querySelector(".trade-chart-price-tag");
+
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  const yToPrice = (y) => high - ((y - pad.top) / plotHeight) * range;
+
+  const updateCrosshair = (clientX, clientY) => {
+    const rect = stage.getBoundingClientRect();
+    const localX = ((clientX - rect.left) / rect.width) * width;
+    const localY = ((clientY - rect.top) / rect.height) * height;
+    const boundedX = clamp(localX, pad.left, width - pad.right);
+    const boundedY = clamp(localY, pad.top, height - pad.bottom);
+    const candleIndex = clamp(Math.floor((boundedX - pad.left) / candleSlot), 0, candles.length - 1);
+    const candle = candles[candleIndex];
+    const candleX = xForIndex(candleIndex);
+    const price = yToPrice(boundedY);
+
+    crosshair.hidden = false;
+    crosshairX.style.left = `${(candleX / width) * 100}%`;
+    crosshairY.style.top = `${(boundedY / height) * 100}%`;
+    priceTag.style.top = `${(boundedY / height) * 100}%`;
+    priceTag.textContent = `$${price.toFixed(4)}`;
+
+    const tooltipLeft = candleX / width > 0.72 ? "auto" : `${(candleX / width) * 100}%`;
+    const tooltipRight = candleX / width > 0.72 ? `${((width - candleX) / width) * 100}%` : "auto";
+    tooltip.style.left = tooltipLeft;
+    tooltip.style.right = tooltipRight;
+    tooltip.innerHTML = `
+      <strong>${formatBucketLabel(candle.timestamp, intervalMeta.bucketSeconds)}</strong>
+      <span>价格 $${price.toFixed(4)}</span>
+    `;
+  };
+
+  stage.addEventListener("mousemove", (event) => {
+    updateCrosshair(event.clientX, event.clientY);
+  });
+  stage.addEventListener("mouseenter", (event) => {
+    updateCrosshair(event.clientX, event.clientY);
+  });
+  stage.addEventListener("mouseleave", () => {
+    crosshair.hidden = true;
+  });
 };
 
 const renderNetworkHistoryPager = () => {
@@ -807,6 +1050,7 @@ const renderAll = () => {
   renderActiveOrders();
   renderActiveOrdersPager();
   renderMyOrders();
+  renderPriceChart();
   renderNetworkHistoryOrders();
   renderNetworkHistoryPager();
   renderBalances();
@@ -931,6 +1175,11 @@ const fetchMyOrders = async () => {
     .sort((left, right) => right.id - left.id);
 };
 
+const fetchOrderDetail = async (orderId) => {
+  const payload = await fetchApiJson(`/orders/${orderId}`);
+  return normalizeApiOrder(payload);
+};
+
 const fetchNetworkHistoryOrders = async () => {
   const offset = (appState.networkHistory.page - 1) * appState.networkHistory.pageSize;
   const sortBy =
@@ -946,6 +1195,55 @@ const fetchNetworkHistoryOrders = async () => {
   const payload = await fetchApiJson(`/orders/history?${query}`);
   appState.networkHistory.total = Number(payload.total || 0);
   appState.networkHistoryOrders = (payload.items || []).map(normalizeApiOrder);
+};
+
+const buildCandlesFromOrders = (orders, bucketSeconds) => {
+  const completedOrders = orders
+    .filter((order) => Number(order.status) === 1 && Number(order.priceUsdRaw) > 0 && Number(order.createdAt) > 0)
+    .sort((left, right) => left.createdAt - right.createdAt);
+
+  if (!completedOrders.length) {
+    return { candles: [], tradeCount: 0 };
+  }
+
+  const grouped = new Map();
+  for (const order of completedOrders) {
+    const timestamp = Math.floor(order.createdAt / bucketSeconds) * bucketSeconds;
+    const price = Number(ethers.formatUnits(order.priceUsdRaw, 6));
+    if (!grouped.has(timestamp)) {
+      grouped.set(timestamp, []);
+    }
+    grouped.get(timestamp).push(price);
+  }
+
+  const candles = Array.from(grouped.entries())
+    .sort((left, right) => left[0] - right[0])
+    .slice(-48)
+    .map(([timestamp, prices], index) => ({
+      index,
+      timestamp,
+      open: prices[0],
+      high: Math.max(...prices),
+      low: Math.min(...prices),
+      close: prices[prices.length - 1],
+    }));
+
+  return { candles, tradeCount: completedOrders.length };
+};
+
+const fetchPriceChart = async () => {
+  const bucketSeconds = CHART_INTERVALS[appState.priceChart.interval]?.bucketSeconds || 3600;
+  const query = buildApiQuery({
+    offset: 0,
+    limit: 400,
+    sort_by: "created_at",
+    sort_dir: "asc",
+  });
+  const payload = await fetchApiJson(`/orders/history?${query}`);
+  const orders = (payload.items || []).map(normalizeApiOrder);
+  const { candles, tradeCount } = buildCandlesFromOrders(orders, bucketSeconds);
+  appState.priceChart.candles = candles;
+  appState.priceChart.tradeCount = tradeCount;
 };
 
 const withBalanceTimeout = async (promise, timeoutMs = 60000) => {
@@ -1066,6 +1364,28 @@ const loadMyOrders = async () => {
   }
 };
 
+const loadPriceChart = async () => {
+  const requestId = ++appState.requests.priceChart;
+  appState.loading.priceChart = true;
+  appState.errors.priceChart = "";
+  renderPriceChart();
+  try {
+    await fetchPriceChart();
+    if (requestId !== appState.requests.priceChart) return;
+  } catch (error) {
+    if (requestId !== appState.requests.priceChart) return;
+    appState.priceChart.candles = [];
+    appState.priceChart.tradeCount = 0;
+    appState.errors.priceChart = error.message || "成交价 K 线加载失败";
+    throw error;
+  } finally {
+    if (requestId === appState.requests.priceChart) {
+      appState.loading.priceChart = false;
+      renderPriceChart();
+    }
+  }
+};
+
 const loadNetworkHistory = async () => {
   const requestId = ++appState.requests.networkHistory;
   appState.loading.networkHistory = true;
@@ -1141,6 +1461,7 @@ const refreshDataAjax = async (message = "正在刷新市场数据...") => {
   const results = await Promise.allSettled([
     loadMarket(),
     loadMyOrders(),
+    loadPriceChart(),
     loadNetworkHistory(),
     loadBalances(),
   ]);
@@ -1305,6 +1626,38 @@ const getPaymentInfoWithFallback = async (orderId) => {
   }
 };
 
+const toDisplayError = (error, fallback = "操作失败") =>
+  error?.shortMessage || error?.message || fallback;
+
+const getOrderInactiveMessage = (order) => {
+  if (!order) return null;
+  if (Number(order.status) === 3) return `订单 #${order.id} 已取消，不能买入`;
+  if (Number(order.status) === 2) return `订单 #${order.id} 正在取消中，暂时不能买入`;
+  if (Number(order.status) === 1) return `订单 #${order.id} 已成交，不能重复买入`;
+  if (Number(order.status) !== 0) {
+    return `订单 #${order.id} 当前状态为 ${order.statusLabel || order.status}，不能买入`;
+  }
+  return null;
+};
+
+const resolveBuyOrderError = async (orderId, error) => {
+  try {
+    const latestOrder = await fetchOrderDetail(orderId);
+    const inactiveMessage = getOrderInactiveMessage(latestOrder);
+    if (inactiveMessage) {
+      return new Error(inactiveMessage);
+    }
+  } catch {
+    // Ignore status refresh failures and fall back to the original error below.
+  }
+
+  const reason = String(toDisplayError(error, "买入失败")).toLowerCase();
+  if (reason.includes("user rejected") || reason.includes("rejected action")) {
+    return new Error(`订单 #${orderId} 买入未完成，请确认订单仍有效后重试`);
+  }
+  return error instanceof Error ? error : new Error(toDisplayError(error, "买入失败"));
+};
+
 const createOrder = async (formData) => {
   if (!appState.account) {
     await connectWallet();
@@ -1331,9 +1684,37 @@ const createOrder = async (formData) => {
   setStatus("success", orderId !== null ? `卖单创建成功，订单 #${orderId}` : `卖单创建成功: ${shortTx(tx.hash)}`);
 };
 
+const submitBuyOrderPrototype = async (formData) => {
+  const amountAxon = Number(formData.get("amountAxon"));
+  const priceUsd = Number(formData.get("priceUsd"));
+  const paymentChainId = Number(formData.get("paymentChainId"));
+  const paymentToken = String(formData.get("paymentToken"));
+  const buyerPaymentAddr = formData.get("buyerPaymentAddr").trim() || appState.account || "当前钱包地址";
+
+  if (!Number.isFinite(amountAxon) || amountAxon <= 0) {
+    throw new Error("请输入有效的购买数量");
+  }
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0) {
+    throw new Error("请输入有效的目标单价");
+  }
+
+  const estimatedTotal = amountAxon * priceUsd;
+  setStatus(
+    "info",
+    `挂买单原型已填写：买入 ${amountAxon} AXON，单价 $${priceUsd.toFixed(6)}，总价约 $${estimatedTotal.toFixed(4)}，付款链 ${CHAINS[paymentChainId]?.label || paymentChainId}，代币 ${paymentToken}，付款地址 ${buyerPaymentAddr}`
+  );
+  window.alert("当前为挂买单原型界面，现网合约暂未支持 createBuyOrder。表单字段已就位，后续可直接接真实合约。");
+};
+
 const buyOrder = async (orderId) => {
   if (!appState.account) {
     await connectWallet();
+  }
+
+  const order = await fetchOrderDetail(orderId);
+  const inactiveMessage = getOrderInactiveMessage(order);
+  if (inactiveMessage) {
+    throw new Error(inactiveMessage);
   }
 
   setStatus("info", `正在获取订单 #${orderId} 的付款信息...`);
@@ -1458,6 +1839,11 @@ ui.networkHistorySearchReset?.addEventListener("click", async () => {
   await loadNetworkHistory();
 });
 
+ui.priceChartInterval?.addEventListener("change", async (event) => {
+  appState.priceChart.interval = event.target.value || "hour";
+  await loadPriceChart();
+});
+
 ui.keeperUrlInput?.addEventListener("change", (event) => {
   appState.settings.keeperUrl = event.target.value.trim() || DEFAULT_KEEPER_URL;
 });
@@ -1490,6 +1876,19 @@ ui.createOrderForm.addEventListener("submit", async (event) => {
   }
 });
 
+ui.createBuyOrderForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submitButton = ui.createBuyOrderForm.querySelector('button[type="submit"]');
+  withTemporaryButtonLock(submitButton);
+  try {
+    const formData = new FormData(ui.createBuyOrderForm);
+    await submitBuyOrderPrototype(formData);
+  } catch (error) {
+    console.error(error);
+    setStatus("error", toDisplayError(error, "挂买单原型提交失败"));
+  }
+});
+
 ui.activeOrdersBody.addEventListener("click", async (event) => {
   const buyButton = event.target.closest("[data-buy]");
   if (!buyButton) return;
@@ -1510,7 +1909,8 @@ ui.activeOrdersBody.addEventListener("click", async (event) => {
     await refreshDataAjax("付款完成，正在刷新订单状态...");
   } catch (error) {
     console.error(error);
-    setStatus("error", error.shortMessage || error.message || "买入失败");
+    const resolvedError = await resolveBuyOrderError(orderId, error);
+    setStatus("error", toDisplayError(resolvedError, "买入失败"));
     window.alert(appState.status.text);
   }
 });
