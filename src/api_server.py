@@ -35,7 +35,7 @@ MARKET_SORT_FIELDS = {
     "created_at": "created_at",
     "id": "id",
 }
-DEFAULT_AXON_RPC_FALLBACK = "https://mainnet-rpc.axonchain.ai/"
+DEFAULT_AXON_RPC_FALLBACK = "http://127.0.0.1:8545"
 DEFAULT_BSC_RPC_FALLBACK = "https://bsc-dataseed.binance.org/"
 DEFAULT_ARBITRUM_RPC_FALLBACK = "https://arb1.arbitrum.io/rpc"
 BALANCE_FETCH_TIMEOUT_SECONDS = 6

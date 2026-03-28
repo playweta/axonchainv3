@@ -972,35 +972,53 @@ const formatBalanceItem = (chainId, asset, balance) => ({
       : `${CHAINS[chainId]?.label || chainId} 资产`,
 });
 
+const fetchBalancesForChainViaApi = async (chainId) => {
+  const payload = await fetchApiJsonWithTimeout(
+    `/addresses/${appState.account}/balances?chain_id=${encodeURIComponent(chainId)}`,
+    60000
+  );
+  return (payload.items || []).map((item) =>
+    formatBalanceItem(Number(item.chain_id), item.asset, Number(item.balance))
+  );
+};
+
 const fetchBalancesForChain = async (chainId) => {
   if (!appState.account) {
     return [];
   }
-  const provider = getReadProvider(chainId);
-  if (!provider) {
-    throw new Error(`未配置 ${CHAINS[chainId]?.label || chainId} RPC`);
+  if (chainId === 8210) {
+    return fetchBalancesForChainViaApi(chainId);
   }
+  try {
+    const provider = getReadProvider(chainId);
+    if (!provider) {
+      throw new Error(`未配置 ${CHAINS[chainId]?.label || chainId} RPC`);
+    }
 
-  const nativeSymbol = CHAINS[chainId]?.nativeSymbol;
-  const items = [];
+    const nativeSymbol = CHAINS[chainId]?.nativeSymbol;
+    const items = [];
 
-  const nativeBalance = await withBalanceTimeout(provider.getBalance(appState.account), 60000);
-  items.push(formatBalanceItem(chainId, nativeSymbol, Number(ethers.formatEther(nativeBalance))));
+    const nativeBalance = await withBalanceTimeout(provider.getBalance(appState.account), 60000);
+    items.push(formatBalanceItem(chainId, nativeSymbol, Number(ethers.formatEther(nativeBalance))));
 
-  const tokenMap = TOKENS[chainId] || {};
-  for (const [symbol, tokenMeta] of Object.entries(tokenMap)) {
-    const contract = new ethers.Contract(tokenMeta.address, ERC20_ABI, provider);
-    const rawBalance = await withBalanceTimeout(contract.balanceOf(appState.account), 60000);
-    items.push(
-      formatBalanceItem(
-        chainId,
-        symbol,
-        Number(ethers.formatUnits(rawBalance, tokenMeta.decimals))
-      )
-    );
+    const tokenMap = TOKENS[chainId] || {};
+    for (const [symbol, tokenMeta] of Object.entries(tokenMap)) {
+      const contract = new ethers.Contract(tokenMeta.address, ERC20_ABI, provider);
+      const rawBalance = await withBalanceTimeout(contract.balanceOf(appState.account), 60000);
+      items.push(
+        formatBalanceItem(
+          chainId,
+          symbol,
+          Number(ethers.formatUnits(rawBalance, tokenMeta.decimals))
+        )
+      );
+    }
+
+    return items;
+  } catch (error) {
+    console.warn(`Direct RPC balance read failed for chain ${chainId}, falling back to backend API.`, error);
+    return fetchBalancesForChainViaApi(chainId);
   }
-
-  return items;
 };
 
 const loadMarket = async () => {
