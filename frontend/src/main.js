@@ -79,6 +79,12 @@ const appState = {
     candles: [],
     tradeCount: 0,
   },
+  orderDetail: {
+    open: false,
+    loading: false,
+    error: "",
+    order: null,
+  },
   networkHistory: {
     page: 1,
     pageSize: 20,
@@ -94,12 +100,13 @@ const appState = {
     networkHistory: false,
     balances: false,
   },
-  errors: {
-    market: "",
-    history: "",
-    priceChart: "",
-    networkHistory: "",
-    balances: "",
+    errors: {
+      market: "",
+      history: "",
+      priceChart: "",
+      orderDetail: "",
+      networkHistory: "",
+      balances: "",
   },
   requests: {
     market: 0,
@@ -381,6 +388,20 @@ root.innerHTML = `
       </div>
     </section>
 
+    <div id="orderDetailModal" class="modal-shell hidden" aria-hidden="true">
+      <div id="orderDetailBackdrop" class="modal-backdrop"></div>
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="orderDetailTitle">
+        <div class="modal-head">
+          <div>
+            <p class="panel-kicker">Order Detail</p>
+            <h2 id="orderDetailTitle">订单详情</h2>
+          </div>
+          <button id="orderDetailClose" class="button button-mini button-ghost" type="button">关闭</button>
+        </div>
+        <div id="orderDetailBody" class="modal-body"></div>
+      </section>
+    </div>
+
   </main>
 `;
 
@@ -412,6 +433,10 @@ const ui = {
   priceChart: document.querySelector("#priceChart"),
   priceChartMeta: document.querySelector("#priceChartMeta"),
   priceChartInterval: document.querySelector("#priceChartInterval"),
+  orderDetailModal: document.querySelector("#orderDetailModal"),
+  orderDetailBackdrop: document.querySelector("#orderDetailBackdrop"),
+  orderDetailClose: document.querySelector("#orderDetailClose"),
+  orderDetailBody: document.querySelector("#orderDetailBody"),
   networkHistoryBody: document.querySelector("#networkHistoryBody"),
   networkHistoryCount: document.querySelector("#networkHistoryCount"),
   networkHistoryPager: document.querySelector("#networkHistoryPager"),
@@ -433,6 +458,7 @@ const formatDate = (timestamp) => {
   if (!timestamp) return "-";
   return new Date(Number(timestamp) * 1000).toLocaleString("zh-CN", { hour12: false });
 };
+const formatDetailAddress = (value) => safeText(value, "-");
 const formatBucketLabel = (timestamp, bucketSeconds) => {
   const date = new Date(Number(timestamp) * 1000);
   if (bucketSeconds >= 86400) {
@@ -670,7 +696,7 @@ const renderActiveOrders = () => {
   ui.activeOrdersBody.innerHTML = appState.activeOrders
     .map(
       (order) => `
-        <tr>
+        <tr data-order-row="${order.id}">
           <td>#${order.id}</td>
           <td class="address-cell" title="${order.seller}">${order.seller}</td>
           <td>${formatUsd(order.amountAxon)} AXON</td>
@@ -678,7 +704,9 @@ const renderActiveOrders = () => {
           <td>${formatUsd(order.totalPayment)} ${order.paymentToken}</td>
           <td>${CHAINS[order.paymentChainId]?.label ?? order.paymentChainId}</td>
           <td><span class="pill">${order.statusLabel}</span></td>
-          <td><button class="button button-mini button-primary" data-buy="${order.id}">买入</button></td>
+          <td class="action-cell">
+            <button class="button button-mini button-primary" data-buy="${order.id}">买入</button>
+          </td>
         </tr>
       `
     )
@@ -742,7 +770,7 @@ const renderMyOrders = () => {
         );
       }
       return `
-        <tr>
+        <tr data-order-row="${order.id}">
           <td>#${order.id}</td>
           <td>${order.role || "-"}</td>
           <td>${formatUsd(order.amountAxon)} AXON</td>
@@ -792,7 +820,7 @@ const renderNetworkHistoryOrders = () => {
   ui.networkHistoryBody.innerHTML = appState.networkHistoryOrders
     .map(
       (order) => `
-        <tr>
+        <tr data-order-row="${order.id}">
           <td>#${order.id}</td>
           <td class="address-cell" title="${order.seller}">${order.seller}</td>
           <td class="address-cell" title="${order.buyer}">${order.buyer}</td>
@@ -804,6 +832,55 @@ const renderNetworkHistoryOrders = () => {
       `
     )
     .join("");
+};
+
+const renderOrderDetailModal = () => {
+  const isOpen = appState.orderDetail.open;
+  ui.orderDetailModal?.classList.toggle("hidden", !isOpen);
+  ui.orderDetailModal?.setAttribute("aria-hidden", String(!isOpen));
+  if (!ui.orderDetailBody) return;
+
+  if (appState.orderDetail.loading) {
+    ui.orderDetailBody.innerHTML = '<div class="empty-card">正在加载订单详情...</div>';
+    return;
+  }
+
+  if (appState.orderDetail.error) {
+    ui.orderDetailBody.innerHTML = `<div class="empty-card">${appState.orderDetail.error}</div>`;
+    return;
+  }
+
+  const order = appState.orderDetail.order;
+  if (!order) {
+    ui.orderDetailBody.innerHTML = '<div class="empty-card">暂无订单详情。</div>';
+    return;
+  }
+
+  ui.orderDetailBody.innerHTML = `
+    <div class="detail-grid">
+      <article class="detail-item"><span>订单号</span><strong>#${order.id}</strong></article>
+      <article class="detail-item"><span>状态</span><strong>${order.statusLabel}</strong></article>
+      <article class="detail-item"><span>AXON 数量</span><strong>${formatUsd(order.amountAxon)} AXON</strong></article>
+      <article class="detail-item"><span>单价</span><strong>$${formatPrice(order.priceUsdRaw)}</strong></article>
+      <article class="detail-item"><span>总价</span><strong>${formatUsd(order.totalPayment)} ${order.paymentToken}</strong></article>
+      <article class="detail-item"><span>支付链</span><strong>${CHAINS[order.paymentChainId]?.label ?? order.paymentChainId}</strong></article>
+      <article class="detail-item detail-item-wide"><span>卖方地址</span><strong class="detail-address">${formatDetailAddress(order.seller)}</strong></article>
+      <article class="detail-item detail-item-wide"><span>买方地址</span><strong class="detail-address">${formatDetailAddress(order.buyer)}</strong></article>
+      <article class="detail-item detail-item-wide"><span>卖方收款地址</span><strong class="detail-address">${formatDetailAddress(order.sellerPaymentAddr)}</strong></article>
+      <article class="detail-item"><span>创建时间</span><strong>${formatDate(order.createdAt)}</strong></article>
+      <article class="detail-item"><span>取消请求时间</span><strong>${formatDate(order.cancelRequestedAt)}</strong></article>
+      <article class="detail-item"><span>角色</span><strong>${safeText(order.role, "-")}</strong></article>
+    </div>
+    ${
+      Number(order.status) === 0
+        ? `
+          <div class="modal-actions">
+            <button class="button button-primary" data-detail-buy="${order.id}">买入该订单</button>
+          </div>
+        `
+        : ""
+    }
+  `;
 };
 
 const renderPriceChart = () => {
@@ -1054,6 +1131,7 @@ const renderAll = () => {
   renderNetworkHistoryOrders();
   renderNetworkHistoryPager();
   renderBalances();
+  renderOrderDetailModal();
   setStatus(appState.status.kind, appState.status.text);
 };
 
@@ -1178,6 +1256,30 @@ const fetchMyOrders = async () => {
 const fetchOrderDetail = async (orderId) => {
   const payload = await fetchApiJson(`/orders/${orderId}`);
   return normalizeApiOrder(payload);
+};
+
+const openOrderDetail = async (orderId) => {
+  appState.orderDetail.open = true;
+  appState.orderDetail.loading = true;
+  appState.orderDetail.error = "";
+  appState.orderDetail.order = null;
+  renderOrderDetailModal();
+  try {
+    appState.orderDetail.order = await fetchOrderDetail(orderId);
+  } catch (error) {
+    appState.orderDetail.error = error.message || "订单详情加载失败";
+  } finally {
+    appState.orderDetail.loading = false;
+    renderOrderDetailModal();
+  }
+};
+
+const closeOrderDetail = () => {
+  appState.orderDetail.open = false;
+  appState.orderDetail.loading = false;
+  appState.orderDetail.error = "";
+  appState.orderDetail.order = null;
+  renderOrderDetailModal();
 };
 
 const fetchNetworkHistoryOrders = async () => {
@@ -1658,6 +1760,32 @@ const resolveBuyOrderError = async (orderId, error) => {
   return error instanceof Error ? error : new Error(toDisplayError(error, "买入失败"));
 };
 
+const handleBuyAction = async (orderId, button) => {
+  const now = Date.now();
+  const lockedUntil = appState.interactionLocks.buyOrderUntilById[orderId] || 0;
+  if (lockedUntil > now) {
+    const remaining = getRemainingLockSeconds(lockedUntil);
+    setStatus("error", `订单 #${orderId} 买入按钮冷却中，请 ${remaining} 秒后再试`);
+    window.alert(appState.status.text);
+    return;
+  }
+
+  appState.interactionLocks.buyOrderUntilById[orderId] = now + REPEAT_CLICK_LOCK_MS;
+  withTemporaryButtonLock(button);
+  try {
+    await buyOrder(orderId);
+    await refreshDataAjax("付款完成，正在刷新订单状态...");
+    if (appState.orderDetail.open && Number(appState.orderDetail.order?.id) === Number(orderId)) {
+      await openOrderDetail(orderId);
+    }
+  } catch (error) {
+    console.error(error);
+    const resolvedError = await resolveBuyOrderError(orderId, error);
+    setStatus("error", toDisplayError(resolvedError, "买入失败"));
+    window.alert(appState.status.text);
+  }
+};
+
 const createOrder = async (formData) => {
   if (!appState.account) {
     await connectWallet();
@@ -1891,27 +2019,19 @@ ui.createBuyOrderForm?.addEventListener("submit", async (event) => {
 
 ui.activeOrdersBody.addEventListener("click", async (event) => {
   const buyButton = event.target.closest("[data-buy]");
-  if (!buyButton) return;
-  const orderId = Number(buyButton.dataset.buy);
-  const now = Date.now();
-  const lockedUntil = appState.interactionLocks.buyOrderUntilById[orderId] || 0;
-  if (lockedUntil > now) {
-    const remaining = getRemainingLockSeconds(lockedUntil);
-    setStatus("error", `订单 #${orderId} 买入按钮冷却中，请 ${remaining} 秒后再试`);
-    window.alert(appState.status.text);
+  if (buyButton) {
+    const orderId = Number(buyButton.dataset.buy);
+    await handleBuyAction(orderId, buyButton);
     return;
   }
 
-  appState.interactionLocks.buyOrderUntilById[orderId] = now + REPEAT_CLICK_LOCK_MS;
-  withTemporaryButtonLock(buyButton);
+  const row = event.target.closest("[data-order-row]");
+  if (!row) return;
   try {
-    await buyOrder(orderId);
-    await refreshDataAjax("付款完成，正在刷新订单状态...");
+    await openOrderDetail(Number(row.dataset.orderRow));
   } catch (error) {
     console.error(error);
-    const resolvedError = await resolveBuyOrderError(orderId, error);
-    setStatus("error", toDisplayError(resolvedError, "买入失败"));
-    window.alert(appState.status.text);
+    setStatus("error", error.shortMessage || error.message || "订单详情加载失败");
   }
 });
 
@@ -2005,12 +2125,40 @@ ui.myOrdersBody.addEventListener("click", async (event) => {
     } else if (abortCancel) {
       await submitSellerAction("abortCancel", Number(abortCancel.dataset.abortCancel), "撤销取消");
     } else {
+      const row = event.target.closest("[data-order-row]");
+      if (!row) return;
+      await openOrderDetail(Number(row.dataset.orderRow));
       return;
     }
     await refreshDataAjax("卖方操作成功，正在刷新数据...");
   } catch (error) {
     console.error(error);
     setStatus("error", error.shortMessage || error.message || "卖方操作失败");
+  }
+});
+
+ui.networkHistoryBody.addEventListener("click", async (event) => {
+  const row = event.target.closest("[data-order-row]");
+  if (!row) return;
+  try {
+    await openOrderDetail(Number(row.dataset.orderRow));
+  } catch (error) {
+    console.error(error);
+    setStatus("error", error.shortMessage || error.message || "订单详情加载失败");
+  }
+});
+
+ui.orderDetailClose?.addEventListener("click", closeOrderDetail);
+ui.orderDetailBackdrop?.addEventListener("click", closeOrderDetail);
+ui.orderDetailBody?.addEventListener("click", async (event) => {
+  const buyButton = event.target.closest("[data-detail-buy]");
+  if (!buyButton) return;
+  await handleBuyAction(Number(buyButton.dataset.detailBuy), buyButton);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && appState.orderDetail.open) {
+    closeOrderDetail();
   }
 });
 
