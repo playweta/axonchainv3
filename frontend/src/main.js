@@ -6,6 +6,7 @@ import {
   CONTRACT_ADDRESS,
   DEFAULT_KEEPER_URL,
   ERC20_ABI,
+  getReadProvider,
   ORDER_CREATED_TOPIC,
   STATUS_LABELS,
   TOKENS,
@@ -947,6 +948,18 @@ const fetchNetworkHistoryOrders = async () => {
   appState.networkHistoryOrders = (payload.items || []).map(normalizeApiOrder);
 };
 
+const withBalanceTimeout = async (promise, timeoutMs = 60000) => {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error("请求超时")), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+};
+
 const formatBalanceItem = (chainId, asset, balance) => ({
   chainId,
   chainName: String(CHAINS[chainId]?.label || chainId),
@@ -963,13 +976,31 @@ const fetchBalancesForChain = async (chainId) => {
   if (!appState.account) {
     return [];
   }
-  const payload = await fetchApiJsonWithTimeout(
-    `/addresses/${appState.account}/balances?chain_id=${encodeURIComponent(chainId)}`,
-    60000
-  );
-  return (payload.items || []).map((item) =>
-    formatBalanceItem(Number(item.chain_id), item.asset, Number(item.balance))
-  );
+  const provider = getReadProvider(chainId);
+  if (!provider) {
+    throw new Error(`未配置 ${CHAINS[chainId]?.label || chainId} RPC`);
+  }
+
+  const nativeSymbol = CHAINS[chainId]?.nativeSymbol;
+  const items = [];
+
+  const nativeBalance = await withBalanceTimeout(provider.getBalance(appState.account), 60000);
+  items.push(formatBalanceItem(chainId, nativeSymbol, Number(ethers.formatEther(nativeBalance))));
+
+  const tokenMap = TOKENS[chainId] || {};
+  for (const [symbol, tokenMeta] of Object.entries(tokenMap)) {
+    const contract = new ethers.Contract(tokenMeta.address, ERC20_ABI, provider);
+    const rawBalance = await withBalanceTimeout(contract.balanceOf(appState.account), 60000);
+    items.push(
+      formatBalanceItem(
+        chainId,
+        symbol,
+        Number(ethers.formatUnits(rawBalance, tokenMeta.decimals))
+      )
+    );
+  }
+
+  return items;
 };
 
 const loadMarket = async () => {

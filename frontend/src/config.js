@@ -1,3 +1,5 @@
+import { ethers } from "ethers";
+
 export const CONTRACT_ADDRESS = "0x10063340374db851e2628D06F4732d5FF814eB34";
 export const DEFAULT_KEEPER_URL = "https://axonotc.com";
 export const API_BASE = "/api";
@@ -91,3 +93,14 @@ export const ERC20_ABI = [
   "function transfer(address to,uint256 amount) returns (bool)",
   "function decimals() view returns (uint8)"
 ];
+
+const readProviderCache = new Map();
+
+export const getReadProvider = (chainId) => {
+  const chain = CHAINS[chainId];
+  if (!chain?.rpcUrl) return null;
+  if (!readProviderCache.has(chainId)) {
+    readProviderCache.set(chainId, new ethers.JsonRpcProvider(chain.rpcUrl));
+  }
+  return readProviderCache.get(chainId);
+};
