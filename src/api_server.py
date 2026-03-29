@@ -48,7 +48,7 @@ RATE_LIMIT_WRITE_MAX_REQUESTS = int(os.getenv("API_RATE_LIMIT_WRITE_MAX_REQUESTS
 MAX_REQUEST_BODY_BYTES = int(os.getenv("API_MAX_REQUEST_BODY_BYTES", str(64 * 1024)))
 ALLOWED_HOSTS = [
     host.strip()
-    for host in os.getenv("API_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+    for host in os.getenv("API_ALLOWED_HOSTS", "*").split(",")
     if host.strip()
 ]
 ALLOWED_ORIGINS = [
@@ -94,7 +94,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS or ["*"])
+if "*" not in ALLOWED_HOSTS:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS or ["*"])
 
 _rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
 _rate_limit_lock = Lock()
