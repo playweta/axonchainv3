@@ -70,7 +70,7 @@ for order in orders:
 
 ```python
 result = client.buy_full(order_id=12)
-print(result["payment_address"])
+print(result["seller_payment_addr"])
 print(result["payment_tx"])
 ```
 

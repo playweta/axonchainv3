@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, wait
+from decimal import Decimal
 from threading import Lock
 import os
 import time
@@ -13,13 +14,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import requests
 from web3 import Web3
 import uvicorn
 
-from .otc_client import (
+from otc_client import (
     CHAIN_CONFIG,
     DEFAULT_CONTRACT_ADDRESS,
     DEFAULT_KEEPER_URL,
+    STATUS_LABELS,
     OTCClient,
 )
 
@@ -158,6 +161,117 @@ def serialize_order(order: Any) -> dict[str, Any]:
     return order.to_dict() if hasattr(order, "to_dict") else order
 
 
+def _pick_first(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _to_decimal(value: Any, default: str = "0") -> Decimal:
+    try:
+        return Decimal(str(value if value is not None else default))
+    except Exception:
+        return Decimal(default)
+
+
+def normalize_keeper_order(item: dict[str, Any]) -> dict[str, Any]:
+    payment = item.get("payment") if isinstance(item.get("payment"), dict) else {}
+    order_id = int(_pick_first(item, "id") or 0)
+    amount_axon = _to_decimal(_pick_first(item, "amount_axon", "amountAxon"), "0")
+    amount_axon_wei = int(
+        _pick_first(item, "amount_axon_wei", "amountAxonWei") or amount_axon * Decimal(10**18)
+    )
+    price_usd = _to_decimal(_pick_first(item, "price_usd", "priceUsd"), "0")
+    price_usd_raw = int(
+        _pick_first(item, "price_usd_raw", "priceUsdRaw") or price_usd * Decimal(10**6)
+    )
+    total_payment = _to_decimal(
+        _pick_first(item, "total_payment", "totalPayment") or payment.get("amount"),
+        "0",
+    )
+    seller_payment_addr = _pick_first(
+        item,
+        "seller_payment_addr",
+        "paymentAddress",
+        "seller_payment_addr",
+        "sellerPaymentAddr",
+    ) or payment.get("address")
+    status = int(_pick_first(item, "status", "status_code", "state") or 0)
+    status_label = (
+        _pick_first(item, "status_label", "statusLabel")
+        or STATUS_LABELS.get(status)
+        or f"Unknown({status})"
+    )
+    return {
+        "id": order_id,
+        "seller": str(_pick_first(item, "seller") or ""),
+        "buyer": str(_pick_first(item, "buyer") or ""),
+        "amount_axon": float(amount_axon),
+        "amount_axon_wei": amount_axon_wei,
+        "price_usd": float(price_usd),
+        "price_usd_raw": price_usd_raw,
+        "total_payment": float(total_payment),
+        "payment_chain_id": int(
+            _pick_first(item, "payment_chain_id", "paymentChainId", "chain_id", "chainId")
+            or payment.get("chain_id")
+            or 0
+        ),
+        "payment_chain_name": str(
+            _pick_first(item, "payment_chain_name", "paymentChainName") or payment.get("chain_name") or ""
+        ),
+        "payment_token": str(
+            _pick_first(item, "payment_token", "paymentToken", "token") or payment.get("token") or ""
+        ).upper(),
+        "seller_payment_addr": str(seller_payment_addr or ""),
+        "seller_payment_addr": str(seller_payment_addr or ""),
+        "status": status,
+        "status_label": str(status_label),
+        "created_at": int(_pick_first(item, "created_at", "createdAt") or 0),
+        "cancel_requested_at": int(
+            _pick_first(item, "cancel_requested_at", "cancelRequestedAt") or 0
+        ),
+    }
+
+
+def extract_keeper_orders(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
+        items = payload["items"]
+    elif isinstance(payload, dict) and isinstance(payload.get("orders"), list):
+        items = payload["orders"]
+    elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        items = payload["data"]
+    else:
+        raise HTTPException(status_code=502, detail="invalid keeper orders payload")
+    return [normalize_keeper_order(item) for item in items if isinstance(item, dict)]
+
+
+def fetch_keeper_orders(client: OTCClient) -> list[dict[str, Any]]:
+    url = f"{client.keeper_url}/orders"
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "Accept": "application/json",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
+            timeout=15,
+        )
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"keeper orders request failed: HTTP {response.status_code}",
+            )
+        return extract_keeper_orders(response.json())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise serialize_error(exc) from exc
+
+
 def matches_order_query(order: Any, query: str | None) -> bool:
     if not query:
         return True
@@ -166,18 +280,25 @@ def matches_order_query(order: Any, query: str | None) -> bool:
     if not needle:
         return True
 
+    getter = order.get if isinstance(order, dict) else lambda key, default="": getattr(order, key, default)
     haystacks = [
-        str(getattr(order, "id", "")),
-        str(getattr(order, "seller", "")),
-        str(getattr(order, "buyer", "")),
-        str(getattr(order, "payment_token", "")),
-        str(getattr(order, "payment_chain_id", "")),
-        str(getattr(order, "payment_chain_name", "")),
-        str(getattr(order, "status", "")),
-        str(getattr(order, "status_label", "")),
-        str(getattr(order, "seller_payment_addr", "")),
+        str(getter("id", "")),
+        str(getter("seller", "")),
+        str(getter("buyer", "")),
+        str(getter("payment_token", "")),
+        str(getter("payment_chain_id", "")),
+        str(getter("payment_chain_name", "")),
+        str(getter("status", "")),
+        str(getter("status_label", "")),
+        str(getter("seller_payment_addr", "")),
     ]
     return any(needle in value.lower() for value in haystacks)
+
+
+def sort_order_key(order: Any, attr_name: str) -> tuple[Any, int]:
+    if isinstance(order, dict):
+        return order.get(attr_name), int(order.get("id", 0))
+    return getattr(order, attr_name), int(getattr(order, "id", 0))
 
 
 def fetch_all_orders(client: OTCClient) -> list[Any]:
@@ -233,17 +354,17 @@ def market_summary() -> dict[str, Any]:
     client = build_client()
     try:
         orders = [
-            order
+            serialize_order(order)
             for order in client._get_active_orders_page(0, 500)
             if order.status in MARKET_VISIBLE_STATUSES
         ]
-        best_order = min(orders, key=lambda item: item.price_usd_raw) if orders else None
+        best_order = min(orders, key=lambda item: item["price_usd_raw"]) if orders else None
         return {
             "active_total": len(orders),
             "next_order_id": client.get_order_count(),
             "fee_rate_bps": client.fee_rate_bps(),
             "cancel_cooldown": client.cancel_cooldown(),
-            "best_order": serialize_order(best_order) if best_order else None,
+            "best_order": best_order if best_order else None,
         }
     except Exception as exc:
         raise serialize_error(exc) from exc
@@ -260,7 +381,7 @@ def active_orders(
     client = build_client()
     try:
         all_orders = [
-            order
+            serialize_order(order)
             for order in client._get_active_orders_page(0, 500)
             if order.status in MARKET_VISIBLE_STATUSES and matches_order_query(order, query)
         ]
@@ -270,10 +391,7 @@ def active_orders(
             if not attr_name:
                 raise HTTPException(status_code=400, detail="invalid sort_by")
             reverse = sort_dir.lower() != "asc"
-            all_orders.sort(
-                key=lambda order: (getattr(order, attr_name), order.id),
-                reverse=reverse,
-            )
+            all_orders.sort(key=lambda order: sort_order_key(order, attr_name), reverse=reverse)
         orders = all_orders[offset : offset + limit]
         return {
             "offset": offset,
@@ -282,8 +400,10 @@ def active_orders(
             "sort_by": sort_key or None,
             "sort_dir": sort_dir.lower(),
             "query": query or "",
-            "items": [serialize_order(order) for order in orders],
+            "items": orders,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         raise serialize_error(exc) from exc
 
@@ -468,4 +588,4 @@ def root() -> dict[str, str]:
 
 
 if __name__ == "__main__":
-    uvicorn.run("src.api_server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("api_server:app", host="0.0.0.0", port=18000, reload=False)

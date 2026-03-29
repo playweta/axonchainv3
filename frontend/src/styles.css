@@ -155,6 +155,12 @@ body::before {
   color: var(--muted);
 }
 
+:root[data-theme="dark"] .pager-size select {
+  background: #13211d;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
 button,
 input,
 select {
@@ -533,6 +539,12 @@ h3 {
   box-shadow: 0 16px 28px rgba(13, 122, 95, 0.24);
 }
 
+.button-danger {
+  color: white;
+  background: linear-gradient(135deg, #c23737 0%, #991b1b 100%);
+  box-shadow: 0 16px 28px rgba(153, 27, 27, 0.28);
+}
+
 .button-ghost {
   color: var(--ink);
   background: rgba(255, 255, 255, 0.72);
@@ -582,6 +594,21 @@ h3 {
 .pager-current {
   color: var(--muted);
   font-size: 0.92rem;
+}
+
+.pager-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+}
+
+.pager-size select {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--ink);
 }
 
 .button[disabled] {

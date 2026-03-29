@@ -38,6 +38,16 @@ const NETWORK_HISTORY_SORT_API_FIELDS = {
   totalPayment: "total_payment",
   createdAt: "created_at",
 };
+const MARKET_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const NETWORK_HISTORY_PAGE_SIZE_OPTIONS = [20, 50, 100];
+const STATUS_LABELS_ZH = {
+  Active: "活跃",
+  Completed: "已成交",
+  CancelPending: "取消中",
+  Cancelled: "已取消",
+  Disputed: "争议中",
+  Unknown: "未知",
+};
 const CHART_INTERVALS = {
   hour: { label: "1小时", bucketSeconds: 3600 },
   sixHour: { label: "6小时", bucketSeconds: 21600 },
@@ -64,7 +74,7 @@ const appState = {
   },
   market: {
     page: 1,
-    pageSize: 10,
+    pageSize: 50,
     total: 0,
     sortKey: DEFAULT_MARKET_SORT.sortKey,
     sortDirection: DEFAULT_MARKET_SORT.sortDirection,
@@ -84,7 +94,9 @@ const appState = {
     loading: false,
     error: "",
     order: null,
+    source: "",
   },
+  pendingBuysById: {},
   networkHistory: {
     page: 1,
     pageSize: 20,
@@ -458,6 +470,7 @@ const formatDate = (timestamp) => {
   if (!timestamp) return "-";
   return new Date(Number(timestamp) * 1000).toLocaleString("zh-CN", { hour12: false });
 };
+const isBuyPending = (orderId) => Boolean(appState.pendingBuysById[Number(orderId)]);
 const formatDetailAddress = (value) => safeText(value, "-");
 const formatBucketLabel = (timestamp, bucketSeconds) => {
   const date = new Date(Number(timestamp) * 1000);
@@ -568,11 +581,18 @@ const normalizeApiOrder = (order) => ({
   paymentToken: safeText(order.payment_token),
   sellerPaymentAddr: safeText(order.seller_payment_addr, ""),
   status: Number(order.status),
-  statusLabel: safeText(order.status_label, STATUS_LABELS[Number(order.status)] || "Unknown"),
+  statusLabel:
+    STATUS_LABELS_ZH[safeText(order.status_label, STATUS_LABELS[Number(order.status)] || "Unknown")] ||
+    safeText(order.status_label, STATUS_LABELS[Number(order.status)] || "未知"),
   createdAt: Number(order.created_at),
   cancelRequestedAt: Number(order.cancel_requested_at),
   role: safeText(order.role, ""),
 });
+
+const isSameAddress = (left, right) =>
+  Boolean(left && right) && String(left).trim().toLowerCase() === String(right).trim().toLowerCase();
+
+const isOwnSellerOrder = (order) => isSameAddress(order?.seller, appState.account);
 
 const fetchApiJson = async (path) => {
   const response = await fetch(`${API_BASE}${path}`);
@@ -640,7 +660,7 @@ const renderMetrics = () => {
         appState.metrics.cancelCooldown === null
           ? "-"
           : `${Math.round(Number(appState.metrics.cancelCooldown) / 60)} min`,
-      hint: "卖方请求取消后生效",
+      hint: "卖方取消订单后生效",
     },
   ]
     .map(
@@ -705,7 +725,11 @@ const renderActiveOrders = () => {
           <td>${CHAINS[order.paymentChainId]?.label ?? order.paymentChainId}</td>
           <td><span class="pill">${order.statusLabel}</span></td>
           <td class="action-cell">
-            <button class="button button-mini button-primary" data-buy="${order.id}">买入</button>
+            ${
+              isOwnSellerOrder(order)
+                ? `<button class="button button-mini button-danger" data-cancel-request="${order.id}">取消订单</button>`
+                : `<button class="button button-mini button-primary" data-buy="${order.id}" ${isBuyPending(order.id) ? "disabled" : ""}>${isBuyPending(order.id) ? "处理中" : "买入"}</button>`
+            }
           </td>
         </tr>
       `
@@ -722,7 +746,17 @@ const renderActiveOrdersPager = () => {
   const end = total ? Math.min(currentPage * pageSize, total) : 0;
 
   ui.activeOrdersPager.innerHTML = `
-    <div class="pager-meta">显示 ${start}-${end} / ${total}</div>
+    <div class="pager-meta">
+      <span>显示 ${start}-${end} / ${total}</span>
+      <label class="pager-size">
+        <span>每页</span>
+        <select data-market-page-size>
+          ${MARKET_PAGE_SIZE_OPTIONS.map(
+            (size) => `<option value="${size}" ${size === pageSize ? "selected" : ""}>${size}</option>`
+          ).join("")}
+        </select>
+      </label>
+    </div>
     <div class="pager-actions">
       <button class="button button-mini button-ghost" data-market-page="prev" ${currentPage <= 1 ? "disabled" : ""}>上一页</button>
       <span class="pager-current">第 ${currentPage} / ${totalPages} 页</span>
@@ -758,7 +792,7 @@ const renderMyOrders = () => {
       const actions = [];
       if (order.role === "Seller" && order.status === 0) {
         actions.push(
-          `<button class="button button-mini button-ghost" data-cancel-request="${order.id}">请求取消</button>`
+          `<button class="button button-mini button-danger" data-cancel-request="${order.id}">取消订单</button>`
         );
       }
       if (order.role === "Seller" && order.status === 2) {
@@ -851,9 +885,35 @@ const renderOrderDetailModal = () => {
   }
 
   const order = appState.orderDetail.order;
+  const isHistoryDetail = appState.orderDetail.source === "history";
+  const isNetworkHistoryDetail = appState.orderDetail.source === "networkHistory";
   if (!order) {
     ui.orderDetailBody.innerHTML = '<div class="empty-card">暂无订单详情。</div>';
     return;
+  }
+
+  const actionButtons = [];
+  if (isHistoryDetail) {
+    if (Number(order.status) === 0) {
+      actionButtons.push(
+        `<button class="button button-danger" data-cancel-request="${order.id}">取消订单</button>`
+      );
+    } else if (Number(order.status) === 2) {
+      actionButtons.push(
+        `<button class="button button-primary" data-cancel-finalize="${order.id}">完成取消</button>`
+      );
+      actionButtons.push(
+        `<button class="button button-ghost" data-abort-cancel="${order.id}">撤销取消</button>`
+      );
+    }
+  } else if (isOwnSellerOrder(order) && Number(order.status) === 0) {
+    actionButtons.push(
+      `<button class="button button-danger" data-cancel-request="${order.id}">取消订单</button>`
+    );
+  } else if (Number(order.status) === 0 && !isBuyPending(order.id)) {
+    actionButtons.push(
+      `<button class="button button-primary" data-detail-buy="${order.id}">买入该订单</button>`
+    );
   }
 
   ui.orderDetailBody.innerHTML = `
@@ -864,18 +924,24 @@ const renderOrderDetailModal = () => {
       <article class="detail-item"><span>单价</span><strong>$${formatPrice(order.priceUsdRaw)}</strong></article>
       <article class="detail-item"><span>总价</span><strong>${formatUsd(order.totalPayment)} ${order.paymentToken}</strong></article>
       <article class="detail-item"><span>支付链</span><strong>${CHAINS[order.paymentChainId]?.label ?? order.paymentChainId}</strong></article>
-      <article class="detail-item detail-item-wide"><span>卖方地址</span><strong class="detail-address">${formatDetailAddress(order.seller)}</strong></article>
-      <article class="detail-item detail-item-wide"><span>买方地址</span><strong class="detail-address">${formatDetailAddress(order.buyer)}</strong></article>
-      <article class="detail-item detail-item-wide"><span>卖方收款地址</span><strong class="detail-address">${formatDetailAddress(order.sellerPaymentAddr)}</strong></article>
+      <article class="detail-item "><span>卖方地址</span><strong class="detail-address">${formatDetailAddress(order.seller)}</strong></article>
+      ${
+        isNetworkHistoryDetail
+          ? `<article class="detail-item "><span>买方地址</span><strong class="detail-address">${formatDetailAddress(order.buyer)}</strong></article>`
+          : ""
+      }
       <article class="detail-item"><span>创建时间</span><strong>${formatDate(order.createdAt)}</strong></article>
-      <article class="detail-item"><span>取消请求时间</span><strong>${formatDate(order.cancelRequestedAt)}</strong></article>
-      <article class="detail-item"><span>角色</span><strong>${safeText(order.role, "-")}</strong></article>
     </div>
     ${
-      Number(order.status) === 0
+      isBuyPending(order.id)
+        ? `<div class="prototype-note">该订单正在买入流程中，买入按钮暂时已锁定。取消买入后会恢复。</div>`
+        : ""
+    }
+    ${
+      actionButtons.length
         ? `
           <div class="modal-actions">
-            <button class="button button-primary" data-detail-buy="${order.id}">买入该订单</button>
+            ${actionButtons.join("")}
           </div>
         `
         : ""
@@ -1042,7 +1108,17 @@ const renderNetworkHistoryPager = () => {
   const end = total ? Math.min(currentPage * pageSize, total) : 0;
 
   ui.networkHistoryPager.innerHTML = `
-    <div class="pager-meta">显示 ${start}-${end} / ${total}</div>
+    <div class="pager-meta">
+      <span>显示 ${start}-${end} / ${total}</span>
+      <label class="pager-size">
+        <span>每页</span>
+        <select data-network-history-page-size>
+          ${NETWORK_HISTORY_PAGE_SIZE_OPTIONS.map(
+            (size) => `<option value="${size}" ${size === pageSize ? "selected" : ""}>${size}</option>`
+          ).join("")}
+        </select>
+      </label>
+    </div>
     <div class="pager-actions">
       <button class="button button-mini button-ghost" data-network-history-page="prev" ${currentPage <= 1 ? "disabled" : ""}>上一页</button>
       <span class="pager-current">第 ${currentPage} / ${totalPages} 页</span>
@@ -1239,6 +1315,12 @@ const fetchMarket = async () => {
   appState.metrics.cancelCooldown = Number(summary.cancel_cooldown || 0);
   appState.market.total = Number(marketPayload.total || 0);
   appState.activeOrders = (marketPayload.items || []).map(normalizeApiOrder);
+  const activeIds = new Set(appState.activeOrders.map((order) => Number(order.id)));
+  Object.keys(appState.pendingBuysById).forEach((orderId) => {
+    if (!activeIds.has(Number(orderId))) {
+      delete appState.pendingBuysById[orderId];
+    }
+  });
 };
 
 const fetchMyOrders = async () => {
@@ -1258,11 +1340,12 @@ const fetchOrderDetail = async (orderId) => {
   return normalizeApiOrder(payload);
 };
 
-const openOrderDetail = async (orderId) => {
+const openOrderDetail = async (orderId, source = "") => {
   appState.orderDetail.open = true;
   appState.orderDetail.loading = true;
   appState.orderDetail.error = "";
   appState.orderDetail.order = null;
+  appState.orderDetail.source = source;
   renderOrderDetailModal();
   try {
     appState.orderDetail.order = await fetchOrderDetail(orderId);
@@ -1279,6 +1362,7 @@ const closeOrderDetail = () => {
   appState.orderDetail.loading = false;
   appState.orderDetail.error = "";
   appState.orderDetail.order = null;
+  appState.orderDetail.source = "";
   renderOrderDetailModal();
 };
 
@@ -1594,6 +1678,8 @@ const normalizePaymentInfo = (orderId, payload, source) => {
   const paymentToken = body.payment_token ?? body.paymentToken ?? body.token ?? body.symbol;
   const paymentAmount =
     body.payment_amount ?? body.paymentAmount ?? body.amount ?? body.amount_decimal;
+  const sellerPaymentAddr =
+    body.seller_payment_addr ?? body.sellerPaymentAddr ?? body.seller_address ?? body.sellerAddress;
 
   if (!paymentAddress || paymentChainId == null || !paymentToken || paymentAmount == null) {
     throw new Error(`Keeper 返回缺少关键字段: ${JSON.stringify(body)}`);
@@ -1602,6 +1688,7 @@ const normalizePaymentInfo = (orderId, payload, source) => {
   return {
     orderId,
     paymentAddress,
+    sellerPaymentAddr: sellerPaymentAddr ? String(sellerPaymentAddr) : "",
     paymentChainId: Number(paymentChainId),
     paymentToken: String(paymentToken).toUpperCase(),
     paymentAmount: String(paymentAmount),
@@ -1667,7 +1754,9 @@ const normalizeDirectKeeperPaymentInfo = (orderId, payload, source) => {
     orderId,
     {
       payment_address:
-        body.payment_address ?? body.paymentAddress ?? payment?.address ?? body.address,
+        body.payment_address ?? body.paymentAddress ?? payment?.address ?? body.address ?? body.pay_to,
+      seller_payment_addr:
+        body.seller_payment_addr ?? body.sellerPaymentAddr ?? body.seller_address ?? body.sellerAddress,
       payment_chain_id:
         body.payment_chain_id ??
         body.paymentChainId ??
@@ -1731,6 +1820,21 @@ const getPaymentInfoWithFallback = async (orderId) => {
 const toDisplayError = (error, fallback = "操作失败") =>
   error?.shortMessage || error?.message || fallback;
 
+const isUserRejectedError = (error) => {
+  const text = String(
+    error?.shortMessage || error?.reason || error?.message || error || ""
+  ).toLowerCase();
+  return (
+    text.includes("user rejected") ||
+    text.includes("rejected action") ||
+    text.includes("user denied") ||
+    text.includes("cancelled") ||
+    text.includes("canceled") ||
+    text.includes("取消") ||
+    text.includes("拒绝")
+  );
+};
+
 const getOrderInactiveMessage = (order) => {
   if (!order) return null;
   if (Number(order.status) === 3) return `订单 #${order.id} 已取消，不能买入`;
@@ -1761,7 +1865,20 @@ const resolveBuyOrderError = async (orderId, error) => {
 };
 
 const handleBuyAction = async (orderId, button) => {
+  const currentOrder =
+    appState.activeOrders.find((item) => Number(item.id) === Number(orderId)) ||
+    (Number(appState.orderDetail.order?.id) === Number(orderId) ? appState.orderDetail.order : null);
+  if (isOwnSellerOrder(currentOrder)) {
+    setStatus("error", `订单 #${orderId} 是你自己发布的订单，只能取消，不能买入`);
+    window.alert(appState.status.text);
+    return;
+  }
   const now = Date.now();
+  if (isBuyPending(orderId)) {
+    setStatus("error", `订单 #${orderId} 正在买入处理中，请先取消当前操作`);
+    window.alert(appState.status.text);
+    return;
+  }
   const lockedUntil = appState.interactionLocks.buyOrderUntilById[orderId] || 0;
   if (lockedUntil > now) {
     const remaining = getRemainingLockSeconds(lockedUntil);
@@ -1771,18 +1888,32 @@ const handleBuyAction = async (orderId, button) => {
   }
 
   appState.interactionLocks.buyOrderUntilById[orderId] = now + REPEAT_CLICK_LOCK_MS;
+  appState.pendingBuysById[orderId] = true;
+  renderActiveOrders();
+  renderOrderDetailModal();
   withTemporaryButtonLock(button);
+  let buySucceeded = false;
   try {
     await buyOrder(orderId);
+    buySucceeded = true;
+    delete appState.pendingBuysById[orderId];
     await refreshDataAjax("付款完成，正在刷新订单状态...");
     if (appState.orderDetail.open && Number(appState.orderDetail.order?.id) === Number(orderId)) {
-      await openOrderDetail(orderId);
+      await openOrderDetail(orderId, appState.orderDetail.source);
     }
   } catch (error) {
     console.error(error);
+    delete appState.pendingBuysById[orderId];
+    renderActiveOrders();
+    renderOrderDetailModal();
     const resolvedError = await resolveBuyOrderError(orderId, error);
     setStatus("error", toDisplayError(resolvedError, "买入失败"));
     window.alert(appState.status.text);
+  } finally {
+    if (!buySucceeded) {
+      renderActiveOrders();
+      renderOrderDetailModal();
+    }
   }
 };
 
@@ -2028,7 +2159,7 @@ ui.activeOrdersBody.addEventListener("click", async (event) => {
   const row = event.target.closest("[data-order-row]");
   if (!row) return;
   try {
-    await openOrderDetail(Number(row.dataset.orderRow));
+    await openOrderDetail(Number(row.dataset.orderRow), "market");
   } catch (error) {
     console.error(error);
     setStatus("error", error.shortMessage || error.message || "订单详情加载失败");
@@ -2051,6 +2182,14 @@ ui.activeOrdersPager.addEventListener("click", async (event) => {
   await refreshOrdersOnly("正在切换活跃订单页...");
 });
 
+ui.activeOrdersPager.addEventListener("change", async (event) => {
+  const select = event.target.closest("[data-market-page-size]");
+  if (!select || appState.loading.market) return;
+  appState.market.pageSize = Number(select.value) || 10;
+  appState.market.page = 1;
+  await refreshOrdersOnly("正在更新活跃订单每页数量...");
+});
+
 ui.networkHistoryPager.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-network-history-page]");
   if (!button || appState.loading.networkHistory) return;
@@ -2070,6 +2209,14 @@ ui.networkHistoryPager.addEventListener("click", async (event) => {
     appState.networkHistory.page += 1;
   }
 
+  await loadNetworkHistory();
+});
+
+ui.networkHistoryPager.addEventListener("change", async (event) => {
+  const select = event.target.closest("[data-network-history-page-size]");
+  if (!select || appState.loading.networkHistory) return;
+  appState.networkHistory.pageSize = Number(select.value) || 20;
+  appState.networkHistory.page = 1;
   await loadNetworkHistory();
 });
 
@@ -2119,7 +2266,7 @@ ui.myOrdersBody.addEventListener("click", async (event) => {
 
   try {
     if (requestCancel) {
-      await submitSellerAction("requestCancelOrder", Number(requestCancel.dataset.cancelRequest), "请求取消");
+      await submitSellerAction("requestCancelOrder", Number(requestCancel.dataset.cancelRequest), "取消订单");
     } else if (finalizeCancel) {
       await submitSellerAction("finalizeCancelOrder", Number(finalizeCancel.dataset.cancelFinalize), "完成取消");
     } else if (abortCancel) {
@@ -2127,7 +2274,7 @@ ui.myOrdersBody.addEventListener("click", async (event) => {
     } else {
       const row = event.target.closest("[data-order-row]");
       if (!row) return;
-      await openOrderDetail(Number(row.dataset.orderRow));
+      await openOrderDetail(Number(row.dataset.orderRow), "history");
       return;
     }
     await refreshDataAjax("卖方操作成功，正在刷新数据...");
@@ -2141,7 +2288,7 @@ ui.networkHistoryBody.addEventListener("click", async (event) => {
   const row = event.target.closest("[data-order-row]");
   if (!row) return;
   try {
-    await openOrderDetail(Number(row.dataset.orderRow));
+    await openOrderDetail(Number(row.dataset.orderRow), "networkHistory");
   } catch (error) {
     console.error(error);
     setStatus("error", error.shortMessage || error.message || "订单详情加载失败");
@@ -2152,8 +2299,36 @@ ui.orderDetailClose?.addEventListener("click", closeOrderDetail);
 ui.orderDetailBackdrop?.addEventListener("click", closeOrderDetail);
 ui.orderDetailBody?.addEventListener("click", async (event) => {
   const buyButton = event.target.closest("[data-detail-buy]");
-  if (!buyButton) return;
-  await handleBuyAction(Number(buyButton.dataset.detailBuy), buyButton);
+  const requestCancel = event.target.closest("[data-cancel-request]");
+  const finalizeCancel = event.target.closest("[data-cancel-finalize]");
+  const abortCancel = event.target.closest("[data-abort-cancel]");
+
+  try {
+    if (buyButton) {
+      await handleBuyAction(Number(buyButton.dataset.detailBuy), buyButton);
+      return;
+    }
+    if (requestCancel) {
+      await submitSellerAction("requestCancelOrder", Number(requestCancel.dataset.cancelRequest), "取消订单");
+    } else if (finalizeCancel) {
+      await submitSellerAction(
+        "finalizeCancelOrder",
+        Number(finalizeCancel.dataset.cancelFinalize),
+        "完成取消"
+      );
+    } else if (abortCancel) {
+      await submitSellerAction("abortCancel", Number(abortCancel.dataset.abortCancel), "撤销取消");
+    } else {
+      return;
+    }
+    await refreshDataAjax("卖方操作成功，正在刷新数据...");
+    if (appState.orderDetail.open && appState.orderDetail.order) {
+      await openOrderDetail(Number(appState.orderDetail.order.id), appState.orderDetail.source);
+    }
+  } catch (error) {
+    console.error(error);
+    setStatus("error", error.shortMessage || error.message || "订单操作失败");
+  }
 });
 
 document.addEventListener("keydown", (event) => {

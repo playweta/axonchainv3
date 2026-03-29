@@ -396,7 +396,7 @@ class OTCClient:
         tx_hash = self._transfer_stablecoin(
             chain_id=int(payment["payment_chain_id"]),
             token=str(payment["payment_token"]).upper(),
-            recipient=Web3.to_checksum_address(payment["payment_address"]),
+            recipient=Web3.to_checksum_address(payment["seller_payment_addr"]),
             amount=Decimal(str(payment["payment_amount"])),
         )
         payment["payment_tx"] = tx_hash
@@ -406,7 +406,7 @@ class OTCClient:
         payment = self.send_payment(order_id, buyer_address=buyer_address)
         return {
             "order_id": int(order_id),
-            "payment_address": payment["payment_address"],
+            "seller_payment_addr": payment["seller_payment_addr"],
             "payment_chain_id": payment["payment_chain_id"],
             "payment_token": payment["payment_token"],
             "payment_amount": payment["payment_amount"],
@@ -719,7 +719,7 @@ class OTCClient:
         if payment:
             payload = {
                 **payload,
-                "payment_address": payment.get("address"),
+                "seller_payment_addr": payment.get("address"),
                 "payment_chain_id": payment.get("chain_id"),
                 "payment_token": payment.get("token"),
                 "payment_amount": payment.get("amount"),
@@ -727,7 +727,7 @@ class OTCClient:
             }
 
         address = (
-            payload.get("payment_address")
+            payload.get("seller_payment_addr")
             or payload.get("paymentAddress")
             or payload.get("address")
             or payload.get("pay_to")
@@ -773,7 +773,7 @@ class OTCClient:
         )
         return {
             "order_id": int(order_id),
-            "payment_address": Web3.to_checksum_address(address),
+            "seller_payment_addr": Web3.to_checksum_address(address),
             "payment_chain_id": int(chain_id),
             "payment_token": str(token).upper(),
             "payment_amount": normalized_amount,
@@ -798,8 +798,8 @@ class OTCClient:
             payment = item.get("payment") if isinstance(item.get("payment"), dict) else {}
             return {
                 **item,
-                "payment_address": (
-                    item.get("payment_address")
+                "seller_payment_addr": (
+                    item.get("seller_payment_addr")
                     or item.get("paymentAddress")
                     or payment.get("address")
                 ),
