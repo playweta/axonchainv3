@@ -179,23 +179,24 @@ def _to_decimal(value: Any, default: str = "0") -> Decimal:
 def normalize_keeper_order(item: dict[str, Any]) -> dict[str, Any]:
     payment = item.get("payment") if isinstance(item.get("payment"), dict) else {}
     order_id = int(_pick_first(item, "id") or 0)
-    amount_axon = _to_decimal(_pick_first(item, "amount_axon", "amountAxon"), "0")
+    amount_axon = _to_decimal(_pick_first(item, "amount_axon", "amountAxon", "amount"), "0")
     amount_axon_wei = int(
         _pick_first(item, "amount_axon_wei", "amountAxonWei") or amount_axon * Decimal(10**18)
     )
-    price_usd = _to_decimal(_pick_first(item, "price_usd", "priceUsd"), "0")
+    price_usd = _to_decimal(_pick_first(item, "price_usd", "priceUsd", "price"), "0")
     price_usd_raw = int(
         _pick_first(item, "price_usd_raw", "priceUsdRaw") or price_usd * Decimal(10**6)
     )
     total_payment = _to_decimal(
-        _pick_first(item, "total_payment", "totalPayment") or payment.get("amount"),
+        _pick_first(item, "total_payment", "totalPayment", "total") or payment.get("amount"),
         "0",
     )
-    seller_payment_addr = _pick_first(
+    payment_address = _pick_first(
         item,
+        "payment_address",
         "seller_payment_addr",
         "paymentAddress",
-        "seller_payment_addr",
+        "paymentAddress",
         "sellerPaymentAddr",
     ) or payment.get("address")
     status = int(_pick_first(item, "status", "status_code", "state") or 0)
@@ -219,13 +220,15 @@ def normalize_keeper_order(item: dict[str, Any]) -> dict[str, Any]:
             or 0
         ),
         "payment_chain_name": str(
-            _pick_first(item, "payment_chain_name", "paymentChainName") or payment.get("chain_name") or ""
+            _pick_first(item, "payment_chain_name", "paymentChainName", "chain")
+            or payment.get("chain_name")
+            or ""
         ),
         "payment_token": str(
             _pick_first(item, "payment_token", "paymentToken", "token") or payment.get("token") or ""
         ).upper(),
-        "seller_payment_addr": str(seller_payment_addr or ""),
-        "seller_payment_addr": str(seller_payment_addr or ""),
+        "payment_address": str(payment_address or ""),
+        "seller_payment_addr": str(payment_address or ""),
         "status": status,
         "status_label": str(status_label),
         "created_at": int(_pick_first(item, "created_at", "createdAt") or 0),
@@ -307,9 +310,16 @@ def fetch_all_orders(client: OTCClient) -> list[Any]:
     if total_orders <= 0:
         return []
 
-    order_ids = list(range(total_orders))
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        return list(executor.map(client.get_order, order_ids))
+    orders: list[Any] = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(client.get_order, order_id) for order_id in range(total_orders)]
+        for future in futures:
+            try:
+                orders.append(future.result())
+            except Exception:
+                # Degrade gracefully: skip broken order reads instead of failing the entire endpoint.
+                continue
+    return orders
 
 
 def fetch_payment_info_with_retries(
@@ -355,9 +365,9 @@ def market_summary() -> dict[str, Any]:
     client = build_client()
     try:
         orders = [
-            serialize_order(order)
-            for order in client._get_active_orders_page(0, 500)
-            if order.status in MARKET_VISIBLE_STATUSES
+            order
+            for order in fetch_keeper_orders(client)
+            if int(order["status"]) in MARKET_VISIBLE_STATUSES
         ]
         best_order = min(orders, key=lambda item: item["price_usd_raw"]) if orders else None
         return {
@@ -382,9 +392,9 @@ def active_orders(
     client = build_client()
     try:
         all_orders = [
-            serialize_order(order)
-            for order in client._get_active_orders_page(0, 500)
-            if order.status in MARKET_VISIBLE_STATUSES and matches_order_query(order, query)
+            order
+            for order in fetch_keeper_orders(client)
+            if int(order["status"]) in MARKET_VISIBLE_STATUSES and matches_order_query(order, query)
         ]
         sort_key = (sort_by or "").strip().lower()
         if sort_key:
@@ -458,8 +468,14 @@ def address_orders(address: str) -> dict[str, Any]:
         address = Web3.to_checksum_address(address)
         ids = client.get_orders_by_address(address)
         unique_ids = list(dict.fromkeys(ids["as_seller"] + ids["as_buyer"]))
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            orders = list(executor.map(client.get_order, unique_ids))
+        orders: list[Any] = []
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(client.get_order, order_id) for order_id in unique_ids]
+            for future in futures:
+                try:
+                    orders.append(future.result())
+                except Exception:
+                    continue
         return {
             "address": address,
             "as_seller": ids["as_seller"],
