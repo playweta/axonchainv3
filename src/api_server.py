@@ -196,7 +196,6 @@ def normalize_keeper_order(item: dict[str, Any]) -> dict[str, Any]:
         "payment_address",
         "seller_payment_addr",
         "paymentAddress",
-        "paymentAddress",
         "sellerPaymentAddr",
     ) or payment.get("address")
     status = int(_pick_first(item, "status", "status_code", "state") or 0)
@@ -334,7 +333,12 @@ def fetch_payment_info_with_retries(
     for attempt in range(attempts):
         client = build_client(payment_path=payment_path, keeper_url=keeper_url)
         try:
-            return client.get_payment_info(order_id, buyer_address=buyer_address)
+            payment = client.get_payment_info(order_id, buyer_address=buyer_address)
+            if "payment_address" not in payment and payment.get("seller_payment_addr"):
+                payment["payment_address"] = payment["seller_payment_addr"]
+            if "seller_payment_addr" not in payment and payment.get("payment_address"):
+                payment["seller_payment_addr"] = payment["payment_address"]
+            return payment
         except Exception as exc:
             last_error = exc
             if attempt < attempts - 1:
@@ -377,6 +381,8 @@ def market_summary() -> dict[str, Any]:
             "cancel_cooldown": client.cancel_cooldown(),
             "best_order": best_order if best_order else None,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         raise serialize_error(exc) from exc
 
@@ -582,6 +588,8 @@ def order_payment_info(
             payment_path=payment_path,
             keeper_url=keeper_url,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise serialize_error(exc) from exc
 
@@ -595,6 +603,8 @@ def order_payment_info_post(order_id: int, body: PaymentInfoOverride) -> dict[st
             keeper_url=body.keeper_url,
             buyer_address=body.buyer_address,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise serialize_error(exc) from exc
 
